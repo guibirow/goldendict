@@ -27,7 +27,7 @@
 #include <string>
 #include <vector>
 #include <qglobal.h>
-#ifdef _MSC_VER
+#if defined( _MSC_VER ) && _MSC_VER < 1800 // VS2012 and older
 #include <stdint_msvc.h>
 #else
 #include <stdint.h>
@@ -120,7 +120,7 @@ const std::string bgl_charsetname[] = {
 const std::string bgl_charset[] = {
 	"WINDOWS-1252", /*Default*/
 	"WINDOWS-1252", /*Latin*/
-	"ISO-8859-2", /*Eastern European*/
+	"WINDOWS-1250", /*Eastern European*/
 	"WINDOWS-1251", /*Cyriilic*/
 	"CP932", /*Japanese*/
 	"BIG5", /*Traditional Chinese*/
@@ -187,17 +187,17 @@ public:
     bool read(std::string &source_charset, std::string &target_charset);
     bgl_entry readEntry( ResourceHandler * = 0 );
 
-    inline std::string title() const { return m_title; };
-    inline std::string author() const { return m_author; };
-    inline std::string email() const { return m_email; };
-    inline std::string description() const { return m_description; };
-    inline std::string copyright() const { return m_copyright; };
-    inline quint32 sourceLang() const { return m_sourceLang; }//std::string sourceLang() const { return m_sourceLang; };
-    inline quint32 targetLang() const { return m_targetLang; }//inline std::string targetLang() const { return m_targetLang; };
-    inline unsigned int numEntries() const { return m_numEntries; };
-    inline std::string charset() const { return m_defaultCharset; };
+    inline std::string title() const { return m_title; }
+    inline std::string author() const { return m_author; }
+    inline std::string email() const { return m_email; }
+    inline std::string description() const { return m_description; }
+    inline std::string copyright() const { return m_copyright; }
+    inline quint32 sourceLang() const { return m_sourceLang; }//std::string sourceLang() const { return m_sourceLang; }
+    inline quint32 targetLang() const { return m_targetLang; }//inline std::string targetLang() const { return m_targetLang; }
+    inline unsigned int numEntries() const { return m_numEntries; }
+    inline std::string charset() const { return m_defaultCharset; }
 
-    inline std::string filename() const { return m_filename; };
+    inline std::string filename() const { return m_filename; }
 
     std::vector< char > const & getIcon() const
     { return icon; }
@@ -229,7 +229,7 @@ private:
 
     std::string m_resourcePrefix;
 
-    enum CHARSET { DEFAULT_CHARSET, SOURCE_CHARSET, TARGET_CHARSET };
+    enum CHARSET { BGL_DEFAULT_CHARSET, BGL_SOURCE_CHARSET, BGL_TARGET_CHARSET };
 };
 
 #endif // BABYLON_H

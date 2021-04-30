@@ -7,9 +7,16 @@
 #include <QStandardItemModel>
 #include "gddebug.hh"
 
+#ifdef MAKE_CHINESE_CONVERSION_SUPPORT
+#include "chineseconversion.hh"
+#endif
+
 
 Sources::Sources( QWidget * parent, Config::Class const & cfg):
   QWidget( parent ),
+#ifdef MAKE_CHINESE_CONVERSION_SUPPORT
+  chineseConversion( new ChineseConversion( this, cfg.transliteration.chinese ) ),
+#endif
 #if defined( Q_OS_WIN32 ) || defined( Q_OS_MAC )
   textToSpeechSource( NULL ),
 #endif
@@ -29,7 +36,7 @@ Sources::Sources( QWidget * parent, Config::Class const & cfg):
   Config::Transliteration const & trs = cfg.transliteration;
   Config::Forvo const & forvo = cfg.forvo;
 
-  // TODO: will programTypeEditorCreator and itemEditorFactory be destoryed by
+  // TODO: will programTypeEditorCreator and itemEditorFactory be destroyed by
   // anyone?
   QItemEditorCreatorBase * programTypeEditorCreator =
          new QStandardItemEditorCreator< ProgramTypeEditor >();
@@ -51,6 +58,7 @@ Sources::Sources( QWidget * parent, Config::Class const & cfg):
   ui.webSites->resizeColumnToContents( 1 );
   ui.webSites->resizeColumnToContents( 2 );
   ui.webSites->resizeColumnToContents( 3 );
+  ui.webSites->resizeColumnToContents( 4 );
 
   ui.dictServers->setTabKeyNavigation( true );
   ui.dictServers->setModel( &dictServersModel );
@@ -93,6 +101,12 @@ Sources::Sources( QWidget * parent, Config::Class const & cfg):
   ui.enableGermanTransliteration->setChecked( trs.enableGermanTransliteration );
   ui.enableGreekTransliteration->setChecked( trs.enableGreekTransliteration );
   ui.enableBelarusianTransliteration->setChecked( trs.enableBelarusianTransliteration );
+
+#ifdef MAKE_CHINESE_CONVERSION_SUPPORT
+  ui.transliterationLayout->addWidget(chineseConversion);
+  ui.transliterationLayout->addItem(new QSpacerItem(20, 40, QSizePolicy::Minimum, QSizePolicy::Expanding));
+#endif
+
   ui.enableRomaji->setChecked( trs.romaji.enable );
   ui.enableHepburn->setChecked( trs.romaji.enableHepburn );
   ui.enableNihonShiki->setChecked( trs.romaji.enableNihonShiki );
@@ -349,6 +363,9 @@ Config::Transliteration Sources::getTransliteration() const
   tr.enableGermanTransliteration = ui.enableGermanTransliteration->isChecked();
   tr.enableGreekTransliteration = ui.enableGreekTransliteration->isChecked();
   tr.enableBelarusianTransliteration = ui.enableBelarusianTransliteration->isChecked();
+#ifdef MAKE_CHINESE_CONVERSION_SUPPORT
+  chineseConversion->getConfig( tr.chinese );
+#endif
   tr.romaji.enable = ui.enableRomaji->isChecked();
   tr.romaji.enableHepburn = ui.enableHepburn->isChecked();
   tr.romaji.enableNihonShiki = ui.enableNihonShiki->isChecked();
@@ -401,7 +418,7 @@ void MediaWikisModel::addNewWiki()
 
 QModelIndex MediaWikisModel::index( int row, int column, QModelIndex const & /*parent*/ ) const
 {
-  return createIndex( row, column, 0 );
+  return createIndex( row, column );
 }
 
 QModelIndex MediaWikisModel::parent( QModelIndex const & /*parent*/ ) const
@@ -551,6 +568,8 @@ void WebSitesModel::addNewSite()
 
   w.url = "http://";
 
+  w.inside_iframe = true;
+
   beginInsertRows( QModelIndex(), webSites.size(), webSites.size() );
   webSites.push_back( w );
   endInsertRows();
@@ -558,7 +577,7 @@ void WebSitesModel::addNewSite()
 
 QModelIndex WebSitesModel::index( int row, int column, QModelIndex const & /*parent*/ ) const
 {
-  return createIndex( row, column, 0 );
+  return createIndex( row, column );
 }
 
 QModelIndex WebSitesModel::parent( QModelIndex const & /*parent*/ ) const
@@ -572,7 +591,7 @@ Qt::ItemFlags WebSitesModel::flags( QModelIndex const & index ) const
 
   if ( index.isValid() )
   {
-    if ( !index.column() )
+    if ( index.column() <= 1 )
       result |= Qt::ItemIsUserCheckable;
     else
       result |= Qt::ItemIsEditable;
@@ -594,21 +613,31 @@ int WebSitesModel::columnCount( QModelIndex const & parent ) const
   if ( parent.isValid() )
     return 0;
   else
-    return 4;
+    return 5;
 }
 
 QVariant WebSitesModel::headerData( int section, Qt::Orientation /*orientation*/, int role ) const
 {
+  if( role == Qt::ToolTipRole )
+  {
+    if( section == 1 )
+      return tr( "Insert article as link inside <iframe> tag" );
+
+    return QVariant();
+  }
+
   if ( role == Qt::DisplayRole )
     switch( section )
     {
       case 0:
         return tr( "Enabled" );
       case 1:
-        return tr( "Name" );
+        return tr( "As link" );
       case 2:
-        return tr( "Address" );
+        return tr( "Name" );
       case 3:
+        return tr( "Address" );
+      case 4:
         return tr( "Icon" );
       default:
         return QVariant();
@@ -622,15 +651,23 @@ QVariant WebSitesModel::data( QModelIndex const & index, int role ) const
   if ( index.row() >= webSites.size() )
     return QVariant();
 
+  if( role == Qt::ToolTipRole )
+  {
+    if( index.column() == 1 )
+      return tr( "Insert article as link inside <iframe> tag" );
+
+    return QVariant();
+  }
+
   if ( role == Qt::DisplayRole || role == Qt::EditRole )
   {
     switch( index.column() )
     {
-      case 1:
-        return webSites[ index.row() ].name;
       case 2:
-        return webSites[ index.row() ].url;
+        return webSites[ index.row() ].name;
       case 3:
+        return webSites[ index.row() ].url;
+      case 4:
         return webSites[ index.row() ].iconFilename;
       default:
         return QVariant();
@@ -639,6 +676,9 @@ QVariant WebSitesModel::data( QModelIndex const & index, int role ) const
 
   if ( role == Qt::CheckStateRole && !index.column() )
     return webSites[ index.row() ].enabled ? Qt::Checked : Qt::Unchecked;
+
+  if ( role == Qt::CheckStateRole && index.column() == 1 )
+    return webSites[ index.row() ].inside_iframe ? Qt::Checked : Qt::Unchecked;
 
   return QVariant();
 }
@@ -661,18 +701,26 @@ bool WebSitesModel::setData( QModelIndex const & index, const QVariant & value,
     return true;
   }
 
+  if ( role == Qt::CheckStateRole && index.column() == 1 )
+  {
+    webSites[ index.row() ].inside_iframe = !webSites[ index.row() ].inside_iframe;
+
+    dataChanged( index, index );
+    return true;
+  }
+
   if ( role == Qt::DisplayRole || role == Qt::EditRole )
     switch( index.column() )
     {
-      case 1:
+      case 2:
         webSites[ index.row() ].name =  value.toString();
         dataChanged( index, index );
         return true;
-      case 2:
+      case 3:
         webSites[ index.row() ].url =  value.toString();
         dataChanged( index, index );
         return true;
-      case 3:
+      case 4:
         webSites[ index.row() ].iconFilename =  value.toString();
         dataChanged( index, index );
         return true;
@@ -714,7 +762,7 @@ void DictServersModel::addNewServer()
 
 QModelIndex DictServersModel::index( int row, int column, QModelIndex const & /*parent*/ ) const
 {
-  return createIndex( row, column, 0 );
+  return createIndex( row, column );
 }
 
 QModelIndex DictServersModel::parent( QModelIndex const & /*parent*/ ) const
@@ -890,7 +938,7 @@ void ProgramsModel::addNewProgram()
 
 QModelIndex ProgramsModel::index( int row, int column, QModelIndex const & /*parent*/ ) const
 {
-  return createIndex( row, column, 0 );
+  return createIndex( row, column );
 }
 
 QModelIndex ProgramsModel::parent( QModelIndex const & /*parent*/ ) const
@@ -1079,7 +1127,7 @@ void PathsModel::addNewPath( QString const & path )
 
 QModelIndex PathsModel::index( int row, int column, QModelIndex const & /*parent*/ ) const
 {
-  return createIndex( row, column, 0 );
+  return createIndex( row, column );
 }
 
 QModelIndex PathsModel::parent( QModelIndex const & /*parent*/ ) const
@@ -1185,7 +1233,7 @@ void SoundDirsModel::addNewSoundDir( QString const & path, QString const & name 
 
 QModelIndex SoundDirsModel::index( int row, int column, QModelIndex const & /*parent*/ ) const
 {
-  return createIndex( row, column, 0 );
+  return createIndex( row, column );
 }
 
 QModelIndex SoundDirsModel::parent( QModelIndex const & /*parent*/ ) const
@@ -1289,12 +1337,13 @@ HunspellDictsModel::HunspellDictsModel( QWidget * parent,
 void HunspellDictsModel::changePath( QString const & newPath )
 {
   dataFiles = HunspellMorpho::findDataFiles( newPath );
-  reset();
+  beginResetModel();
+  endResetModel();
 }
 
 QModelIndex HunspellDictsModel::index( int row, int column, QModelIndex const & /*parent*/ ) const
 {
-  return createIndex( row, column, 0 );
+  return createIndex( row, column );
 }
 
 QModelIndex HunspellDictsModel::parent( QModelIndex const & /*parent*/ ) const

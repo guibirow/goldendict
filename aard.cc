@@ -26,11 +26,15 @@
 #include <QThreadPool>
 #include <QAtomicInt>
 #include <QDomDocument>
-#include <QUrl>
 #include <QtEndian>
+
+#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
+#include <QRegularExpression>
+#endif
 
 #include "ufile.hh"
 #include "wstring_qt.hh"
+#include "qt4x5.hh"
 
 namespace Aard {
 
@@ -259,15 +263,18 @@ class AardDictionary: public BtreeIndexing::BtreeDictionary
 
     virtual sptr< Dictionary::DataRequest > getArticle( wstring const &,
                                                         vector< wstring > const & alts,
-                                                        wstring const & )
-      throw( std::exception );
+                                                        wstring const &,
+                                                        bool ignoreDiacritics )
+      THROW_SPEC( std::exception );
 
     virtual QString const& getDescription();
 
     virtual sptr< Dictionary::DataRequest > getSearchResults( QString const & searchString,
                                                               int searchMode, bool matchCase,
                                                               int distanceBetweenWords,
-                                                              int maxResults );
+                                                              int maxResults,
+                                                              bool ignoreWordsOrder,
+                                                              bool ignoreDiacritics );
     virtual void getArticleText( uint32_t articleAddress, QString & headword, QString & text );
 
     virtual void makeFTSIndex(QAtomicInt & isCancelled, bool firstIteration );
@@ -388,13 +395,35 @@ string AardDictionary::convert( const string & in )
     }
 
     QString text = QString::fromUtf8( inConverted.c_str() );
-    text.replace( QRegExp( "<\\s*a\\s*href\\s*=\\s*\\\"(w:|s:){0,1}([^#](?!ttp://)[^\\\"]*)(.)" ),
+
+#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
+    text.replace( QRegularExpression( "<\\s*a\\s+href\\s*=\\s*\\\"(w:|s:){0,1}([^#](?!ttp://)[^\\\"]*)(.)",
+                                      QRegularExpression::DotMatchesEverythingOption ),
                   "<a href=\"bword:\\2\"");
-    text.replace( QRegExp( "<\\s*a\\s*href\\s*=\\s*'(w:|s:){0,1}([^#](?!ttp://)[^']*)(.)" ),
+    text.replace( QRegularExpression( "<\\s*a\\s+href\\s*=\\s*'(w:|s:){0,1}([^#](?!ttp://)[^']*)(.)",
+                                      QRegularExpression::DotMatchesEverythingOption ),
                   "<a href=\"bword:\\2\"");
+
+    // Anchors
+    text.replace( QRegularExpression( "<a\\s+href=\"bword:([^#\"]+)#([^\"]+)" ),
+                  "<a href=\"gdlookup://localhost/\\1?gdanchor=\\2" );
+
+    static QRegularExpression self_closing_divs( "(<div\\s+[^>]*)/>",
+                                                 QRegularExpression::CaseInsensitiveOption );  // <div ... />
+    text.replace( self_closing_divs, "\\1></div>" );
+#else
+    text.replace( QRegExp( "<\\s*a\\s+href\\s*=\\s*\\\"(w:|s:){0,1}([^#](?!ttp://)[^\\\"]*)(.)" ),
+                  "<a href=\"bword:\\2\"");
+    text.replace( QRegExp( "<\\s*a\\s+href\\s*=\\s*'(w:|s:){0,1}([^#](?!ttp://)[^']*)(.)" ),
+                  "<a href=\"bword:\\2\"");
+
+    // Anchors
+    text.replace( QRegExp( "<a\\s+href=\"bword:([^#\"]+)#([^\"]+)" ),
+                  "<a href=\"gdlookup://localhost/\\1?gdanchor=\\2" );
 
     static QRegExp self_closing_divs( "(<div\\s[^>]*)/>", Qt::CaseInsensitive );  // <div ... />
     text.replace( self_closing_divs, "\\1></div>" );
+#endif
 
     // Fix outstanding elements
     text += "<br style=\"clear:both;\" />";
@@ -554,11 +583,11 @@ QString const& AardDictionary::getDescription()
     {
         map< string, string >::const_iterator iter = meta.find( "copyright" );
         if( iter != meta.end() )
-          dictionaryDescription = "Copyright: " + QString::fromUtf8( iter->second.c_str() ) + "\n\n";
+          dictionaryDescription = QString( QObject::tr( "Copyright: %1%2" ) ).arg( QString::fromUtf8( iter->second.c_str() ) ).arg( "\n\n" );
 
         iter = meta.find( "version" );
         if( iter != meta.end() )
-          dictionaryDescription = "Version: " + QString::fromUtf8( iter->second.c_str() ) + "\n\n";
+          dictionaryDescription = QString( QObject::tr( "Version: %1%2" ) ).arg( QString::fromUtf8( iter->second.c_str() ) ).arg( "\n\n" );
 
         iter = meta.find( "description" );
         if( iter != meta.end() )
@@ -626,9 +655,11 @@ void AardDictionary::getArticleText( uint32_t articleAddress, QString & headword
 sptr< Dictionary::DataRequest > AardDictionary::getSearchResults( QString const & searchString,
                                                                   int searchMode, bool matchCase,
                                                                   int distanceBetweenWords,
-                                                                  int maxResults )
+                                                                  int maxResults,
+                                                                  bool ignoreWordsOrder,
+                                                                  bool ignoreDiacritics )
 {
-  return new FtsHelpers::FTSResultsRequest( *this, searchString,searchMode, matchCase, distanceBetweenWords, maxResults );
+  return new FtsHelpers::FTSResultsRequest( *this, searchString,searchMode, matchCase, distanceBetweenWords, maxResults, ignoreWordsOrder, ignoreDiacritics );
 }
 
 /// AardDictionary::getArticle()
@@ -662,6 +693,7 @@ class AardArticleRequest: public Dictionary::DataRequest
   wstring word;
   vector< wstring > alts;
   AardDictionary & dict;
+  bool ignoreDiacritics;
 
   QAtomicInt isCancelled;
   QSemaphore hasExited;
@@ -670,8 +702,8 @@ public:
 
   AardArticleRequest( wstring const & word_,
                       vector< wstring > const & alts_,
-                      AardDictionary & dict_ ):
-    word( word_ ), alts( alts_ ), dict( dict_ )
+                      AardDictionary & dict_, bool ignoreDiacritics_ ):
+    word( word_ ), alts( alts_ ), dict( dict_ ), ignoreDiacritics( ignoreDiacritics_ )
   {
     QThreadPool::globalInstance()->start(
       new AardArticleRequestRunnable( *this, hasExited ) );
@@ -698,19 +730,19 @@ void AardArticleRequestRunnable::run()
 
 void AardArticleRequest::run()
 {
-  if ( isCancelled )
+  if ( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
   {
     finish();
     return;
   }
 
-  vector< WordArticleLink > chain = dict.findArticles( word );
+  vector< WordArticleLink > chain = dict.findArticles( word, ignoreDiacritics );
 
   for( unsigned x = 0; x < alts.size(); ++x )
   {
     /// Make an additional query for each alt
 
-    vector< WordArticleLink > altChain = dict.findArticles( alts[ x ] );
+    vector< WordArticleLink > altChain = dict.findArticles( alts[ x ], ignoreDiacritics );
 
     chain.insert( chain.end(), altChain.begin(), altChain.end() );
   }
@@ -722,10 +754,12 @@ void AardArticleRequest::run()
                                     // by only allowing them to appear once.
 
   wstring wordCaseFolded = Folding::applySimpleCaseOnly( word );
+  if( ignoreDiacritics )
+    wordCaseFolded = Folding::applyDiacriticsOnly( wordCaseFolded );
 
   for( unsigned x = 0; x < chain.size(); ++x )
   {
-    if ( isCancelled )
+    if ( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
     {
       finish();
       return;
@@ -754,6 +788,8 @@ void AardArticleRequest::run()
 
     wstring headwordStripped =
       Folding::applySimpleCaseOnly( Utf8::decode( headword ) );
+    if( ignoreDiacritics )
+      headwordStripped = Folding::applyDiacriticsOnly( headwordStripped );
 
     multimap< wstring, pair< string, string > > & mapToUse =
       ( wordCaseFolded == headwordStripped ) ?
@@ -806,10 +842,11 @@ void AardArticleRequest::run()
 
 sptr< Dictionary::DataRequest > AardDictionary::getArticle( wstring const & word,
                                                             vector< wstring > const & alts,
-                                                            wstring const & )
-  throw( std::exception )
+                                                            wstring const &,
+                                                            bool ignoreDiacritics )
+  THROW_SPEC( std::exception )
 {
-  return new AardArticleRequest( word, alts, *this );
+  return new AardArticleRequest( word, alts, *this, ignoreDiacritics );
 }
 
 } // anonymous namespace
@@ -817,8 +854,9 @@ sptr< Dictionary::DataRequest > AardDictionary::getArticle( wstring const & word
 vector< sptr< Dictionary::Class > > makeDictionaries(
                                       vector< string > const & fileNames,
                                       string const & indicesDir,
-                                      Dictionary::Initializing & initializing )
-  throw( std::exception )
+                                      Dictionary::Initializing & initializing,
+                                      unsigned maxHeadwordsToExpand )
+  THROW_SPEC( std::exception )
 {
   vector< sptr< Dictionary::Class > > dictionaries;
 
@@ -989,7 +1027,11 @@ vector< sptr< Dictionary::Class > > makeDictionaries(
                 articleOffsets.insert( articleOffset );
 
             // Insert new entry
-            indexedWords.addWord( Utf8::decode( string( data.data(), wordSize ) ), articleOffset);
+            wstring word = Utf8::decode( string( data.data(), wordSize ) );
+            if( maxHeadwordsToExpand && dictHeader.wordsCount >= maxHeadwordsToExpand )
+              indexedWords.addSingleWord( word, articleOffset);
+            else
+              indexedWords.addWord( word, articleOffset);
 
             pos += has64bitIndex ? sizeof( IndexElement64 ) : sizeof( IndexElement );
           }
@@ -1019,12 +1061,12 @@ vector< sptr< Dictionary::Class > > makeDictionaries(
           idxHeader.wordCount = wordCount;
 
           if( langFrom.size() == 3)
-              idxHeader.langFrom = LangCoder::code3toInt( langFrom.c_str() );
+              idxHeader.langFrom = LangCoder::findIdForLanguageCode3( langFrom.c_str() );
           else if( langFrom.size() == 2 )
               idxHeader.langFrom = LangCoder::code2toInt( langFrom.c_str() );
 
           if( langTo.size() == 3)
-              idxHeader.langTo = LangCoder::code3toInt( langTo.c_str() );
+              idxHeader.langTo = LangCoder::findIdForLanguageCode3( langTo.c_str() );
           else if( langTo.size() == 2 )
               idxHeader.langTo = LangCoder::code2toInt( langTo.c_str() );
 

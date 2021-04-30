@@ -9,11 +9,11 @@
 
 class ArticleInspector;
 
-/// A thin wrapper around QWebView to accomodate to some ArticleView's needs.
+/// A thin wrapper around QWebView to accommodate to some ArticleView's needs.
 /// Currently the only added features:
 /// 1. Ability to know if the middle mouse button is pressed or not according
 ///    to the view's current state. This is used to open links in new tabs when
-///    they are clicked with middle button. There's also an added posibility to
+///    they are clicked with middle button. There's also an added possibility to
 ///    get double-click events after the fact with the doubleClicked() signal.
 /// 2. Manage our own QWebInspector instance. In order to show inspector correctly,
 ///    use triggerPageAction( QWebPage::InspectElement ) instead.
@@ -41,7 +41,7 @@ signals:
   /// after the event was processed by the view -- that's the difference from
   /// installing an event filter. This is used for translating the double-clicked
   /// word, which gets selected by the view in response to double-click.
-  void doubleClicked();
+  void doubleClicked( QPoint pos );
 
 protected:
 

@@ -7,6 +7,8 @@
 #include "language.hh"
 #include "fsencoding.hh"
 #include <algorithm>
+
+#include <QMenu>
 #include <QPair>
 
 using std::vector;
@@ -24,7 +26,7 @@ bool dictNameLessThan( sptr< Dictionary::Class > const & dict1,
   if( !str1.isEmpty() && str2.isEmpty() )
     return true;
 
-  return str1.compare( str2, Qt::CaseInsensitive ) < 0;
+  return str1.localeAwareCompare( str2 ) < 0;
 }
 
 bool dictLessThan( sptr< Dictionary::Class > const & dict1,
@@ -54,7 +56,7 @@ bool dictLessThan( sptr< Dictionary::Class > const & dict1,
     return false;
   if( !str1.isEmpty() && str2.isEmpty() )
     return true;
-  int res = str1.compare( str2, Qt::CaseInsensitive );
+  int res = str1.localeAwareCompare( str2 );
   if( res )
     return res < 0;
 
@@ -64,7 +66,7 @@ bool dictLessThan( sptr< Dictionary::Class > const & dict1,
     return false;
   if( !str1.isEmpty() && str2.isEmpty() )
     return true;
-  res = str1.compare( str2, Qt::CaseInsensitive );
+  res = str1.localeAwareCompare( str2 );
   if( res )
     return res < 0;
 
@@ -75,7 +77,7 @@ bool dictLessThan( sptr< Dictionary::Class > const & dict1,
   if( !str1.isEmpty() && str2.isEmpty() )
     return true;
 
-  return str1.compare( str2, Qt::CaseInsensitive ) < 0;
+  return str1.localeAwareCompare( str2 ) < 0;
 }
 
 } // namespace
@@ -89,8 +91,8 @@ OrderAndProps::OrderAndProps( QWidget * parent,
 {
   ui.setupUi( this );
 
-  Instances::Group order( dictionaryOrder, allDictionaries );
-  Instances::Group inactive( inactiveDictionaries, allDictionaries );
+  Instances::Group order( dictionaryOrder, allDictionaries, Config::Group() );
+  Instances::Group inactive( inactiveDictionaries, allDictionaries, Config::Group() );
 
   Instances::complementDictionaryOrder( order, inactive, allDictionaries );
 
@@ -250,13 +252,8 @@ void OrderAndProps::describeDictionary( DictListWidget * lst, QModelIndex const 
 void OrderAndProps::contextMenuRequested( const QPoint & pos )
 {
   QMenu menu( this );
-  QAction * sortNameAction = new QAction( tr( "Sort by name" ), &menu );
-  menu.addAction( sortNameAction );
-  QAction * sortLangAction = new QAction( tr( "Sort by languages" ), &menu );
-  menu.addAction( sortLangAction );
 
   QAction * showHeadwordsAction = NULL;
-
   QModelIndex idx = ui.searchLine->mapToSource( ui.dictionaryOrder->indexAt( pos ) );
   sptr< Dictionary::Class > dict;
   if( idx.isValid() && (unsigned)idx.row() < ui.dictionaryOrder->getCurrentDictionaries().size() )
@@ -266,6 +263,11 @@ void OrderAndProps::contextMenuRequested( const QPoint & pos )
     showHeadwordsAction = new QAction( tr( "Dictionary headwords" ), &menu );
     menu.addAction( showHeadwordsAction );
   }
+
+  QAction * sortNameAction = new QAction( tr( "Sort by name" ), &menu );
+  menu.addAction( sortNameAction );
+  QAction * sortLangAction = new QAction( tr( "Sort by languages" ), &menu );
+  menu.addAction( sortLangAction );
 
   QAction * result = menu.exec( ui.dictionaryOrder->mapToGlobal( pos ) );
 

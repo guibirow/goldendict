@@ -5,11 +5,20 @@
 #include "ftshelpers.hh"
 #include "gddebug.hh"
 #include "mainwindow.hh"
+#include "qt4x5.hh"
 
 #include <QThreadPool>
 #include <QIntValidator>
 #include <QMessageBox>
 #include <qalgorithms.h>
+
+#if ( QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 ) ) && defined( Q_OS_WIN32 )
+
+#include "initializing.hh"
+#include <qt_windows.h>
+#include <uxtheme.h>
+
+#endif
 
 namespace FTS
 {
@@ -29,7 +38,7 @@ void Indexing::run()
     // First iteration - dictionaries with no more MaxDictionarySizeForFastSearch articles
     for( size_t x = 0; x < dictionaries.size(); x++ )
     {
-      if( isCancelled )
+      if( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
         break;
 
       if( dictionaries.at( x )->canFTS()
@@ -43,7 +52,7 @@ void Indexing::run()
     // Second iteration - all remaining dictionaries
     for( size_t x = 0; x < dictionaries.size(); x++ )
     {
-      if( isCancelled )
+      if( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
         break;
 
       if( dictionaries.at( x )->canFTS()
@@ -58,14 +67,13 @@ void Indexing::run()
   {
     gdWarning( "Exception occured while full-text search: %s", ex.what() );
   }
-  emit sendNowIndexingName( tr( "None" ) );
+  emit sendNowIndexingName( QString() );
 }
 
 
 FtsIndexing::FtsIndexing( std::vector< sptr< Dictionary::Class > > const & dicts):
   dictionaries( dicts ),
-  started( false ),
-  nowIndexing( tr( "None" ) )
+  started( false )
 {
 }
 
@@ -76,7 +84,7 @@ void FtsIndexing::doIndexing()
 
   if( !started )
   {
-    while( isCancelled )
+    while( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
       isCancelled.deref();
 
     Indexing *idx = new Indexing( isCancelled, dictionaries, indexingExited );
@@ -93,11 +101,13 @@ void FtsIndexing::stopIndexing()
 {
   if( started )
   {
-    if( !isCancelled )
+    if( !Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
       isCancelled.ref();
 
     indexingExited.acquire();
     started = false;
+
+    setNowIndexedName( QString() );
   }
 }
 
@@ -126,18 +136,20 @@ FullTextSearchDialog::FullTextSearchDialog( QWidget * parent,
   dictionaries( dictionaries_ ),
   groups( groups_ ),
   group( 0 ),
+  ignoreWordsOrder( cfg_.preferences.fts.ignoreWordsOrder ),
+  ignoreDiacritics( cfg_.preferences.fts.ignoreDiacritics ),
   ftsIdx( ftsidx )
 , helpAction( this )
 {
   ui.setupUi( this );
 
-  if( cfg.preferences.fts.dialogGeometry.size() > 0 )
-    restoreGeometry( cfg.preferences.fts.dialogGeometry );
-
   setAttribute( Qt::WA_DeleteOnClose, false );
   setWindowFlags( windowFlags() & ~Qt::WindowContextHelpButtonHint );
 
   setWindowTitle( tr( "Full-text search" ) );
+
+  if( cfg.preferences.fts.dialogGeometry.size() > 0 )
+    restoreGeometry( cfg.preferences.fts.dialogGeometry );
 
   setNewIndexingName( ftsIdx.nowIndexingName() );
 
@@ -170,6 +182,20 @@ FullTextSearchDialog::FullTextSearchDialog( QWidget * parent,
   ui.articlesPerDictionary->setMaximum( MaxArticlesPerDictionary );
   ui.articlesPerDictionary->setValue( cfg.preferences.fts.maxArticlesPerDictionary );
 
+  int mode = ui.searchMode->itemData( ui.searchMode->currentIndex() ).toInt();
+  if( mode == WholeWords || mode == PlainText )
+  {
+    ui.checkBoxIgnoreWordOrder->setChecked( ignoreWordsOrder );
+    ui.checkBoxIgnoreWordOrder->setEnabled( true );
+  }
+  else
+  {
+    ui.checkBoxIgnoreWordOrder->setChecked( false );
+    ui.checkBoxIgnoreWordOrder->setEnabled( false );
+  }
+
+  ui.checkBoxIgnoreDiacritics->setChecked( ignoreDiacritics );
+
   ui.matchCase->setChecked( cfg.preferences.fts.matchCase );
 
   setLimitsUsing();
@@ -180,6 +206,10 @@ FullTextSearchDialog::FullTextSearchDialog( QWidget * parent,
            this, SLOT( setLimitsUsing() ) );
   connect( ui.searchMode, SIGNAL( currentIndexChanged( int ) ),
            this, SLOT( setLimitsUsing() ) );
+  connect( ui.checkBoxIgnoreWordOrder, SIGNAL( stateChanged( int ) ),
+           this, SLOT( ignoreWordsOrderClicked() ) );
+  connect( ui.checkBoxIgnoreDiacritics, SIGNAL( stateChanged( int ) ),
+           this, SLOT( ignoreDiacriticsClicked() ) );
 
   model = new HeadwordsListModel( this, results, activeDicts );
   ui.headwordsView->setModel( model );
@@ -210,12 +240,44 @@ FullTextSearchDialog::FullTextSearchDialog( QWidget * parent,
   delegate = new WordListItemDelegate( ui.headwordsView->itemDelegate() );
   if( delegate )
     ui.headwordsView->setItemDelegate( delegate );
+
+#if ( QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 ) ) && defined( Q_OS_WIN32 )
+
+  // Style "windowsvista" in Qt5 turn off progress bar animation for classic appearance
+  // We use simply "windows" style instead for this case
+
+  oldBarStyle = 0;
+
+  if( QSysInfo::windowsVersion() >= QSysInfo::WV_VISTA
+      && ( QSysInfo::windowsVersion() & QSysInfo::WV_NT_based )
+      && !IsThemeActive() )
+  {
+    QStyle * barStyle = WindowsStyle::instance().getStyle();
+
+    if( barStyle )
+    {
+      oldBarStyle = ui.searchProgressBar->style();
+      ui.searchProgressBar->setStyle( barStyle );
+    }
+  }
+
+#endif
+
+  ui.searchLine->setText( static_cast< MainWindow * >( parent )->getTranslateLineText() );
+  ui.searchLine->selectAll();
 }
 
 FullTextSearchDialog::~FullTextSearchDialog()
 {
   if( delegate )
-    delete delegate;
+    delegate->deleteLater();
+
+#if ( QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 ) ) && defined( Q_OS_WIN32 )
+
+  if( oldBarStyle )
+    ui.searchProgressBar->setStyle( oldBarStyle );
+
+#endif
 }
 
 void FullTextSearchDialog::stopSearch()
@@ -257,13 +319,16 @@ void FullTextSearchDialog::saveData()
   cfg.preferences.fts.maxDistanceBetweenWords = ui.distanceBetweenWords->text().toInt();
   cfg.preferences.fts.useMaxDistanceBetweenWords = ui.checkBoxDistanceBetweenWords->isChecked();
   cfg.preferences.fts.useMaxArticlesPerDictionary = ui.checkBoxArticlesPerDictionary->isChecked();
+  cfg.preferences.fts.ignoreWordsOrder = ignoreWordsOrder;
+  cfg.preferences.fts.ignoreDiacritics = ignoreDiacritics;
 
   cfg.preferences.fts.dialogGeometry = saveGeometry();
 }
 
 void FullTextSearchDialog::setNewIndexingName( QString name )
 {
-  ui.nowIndexingLabel->setText( tr( "Now indexing: " ) + name );
+  ui.nowIndexingLabel->setText( tr( "Now indexing: " )
+                                + ( name.isEmpty() ? tr( "None" ) : name ) );
   showDictNumbers();
 }
 
@@ -274,13 +339,27 @@ void FullTextSearchDialog::setLimitsUsing()
   {
     ui.checkBoxDistanceBetweenWords->setEnabled( true );
     ui.distanceBetweenWords->setEnabled( ui.checkBoxDistanceBetweenWords->isChecked() );
+    ui.checkBoxIgnoreWordOrder->setChecked( ignoreWordsOrder );
+    ui.checkBoxIgnoreWordOrder->setEnabled( true );
   }
   else
   {
+    ui.checkBoxIgnoreWordOrder->setEnabled( false );
+    ui.checkBoxIgnoreWordOrder->setChecked( false );
     ui.checkBoxDistanceBetweenWords->setEnabled( false );
     ui.distanceBetweenWords->setEnabled( false );
   }
   ui.articlesPerDictionary->setEnabled( ui.checkBoxArticlesPerDictionary->isChecked() );
+}
+
+void FullTextSearchDialog::ignoreWordsOrderClicked()
+{
+  ignoreWordsOrder = ui.checkBoxIgnoreWordOrder->isChecked();
+}
+
+void FullTextSearchDialog::ignoreDiacriticsClicked()
+{
+  ignoreDiacritics = ui.checkBoxIgnoreDiacritics->isChecked();
 }
 
 void FullTextSearchDialog::accept()
@@ -348,7 +427,9 @@ void FullTextSearchDialog::accept()
                                                               mode,
                                                               ui.matchCase->isChecked(),
                                                               distanceBetweenWords,
-                                                              maxResultsPerDict
+                                                              maxResultsPerDict,
+                                                              ignoreWordsOrder,
+                                                              ignoreDiacritics
                                                             );
     connect( req.get(), SIGNAL( finished() ),
              this, SLOT( searchReqFinished() ), Qt::QueuedConnection );
@@ -429,7 +510,17 @@ void FullTextSearchDialog::itemClicked( const QModelIndex & idx )
   if( idx.isValid() && idx.row() < results.size() )
   {
     QString headword = results[ idx.row() ].headword;
-    emit showTranslationFor( headword, results[ idx.row() ].dictIDs, searchRegExp );
+    QRegExp reg;
+    if( !results[ idx.row() ].foundHiliteRegExps.isEmpty() )
+    {
+      reg = QRegExp( results[ idx.row() ].foundHiliteRegExps.join( "|"),
+                     results[ idx.row() ].matchCase ? Qt::CaseSensitive : Qt::CaseInsensitive,
+                     QRegExp::RegExp2 );
+      reg.setMinimal( true );
+    }
+    else
+      reg = searchRegExp;
+    emit showTranslationFor( headword, results[ idx.row() ].dictIDs, reg, ignoreDiacritics );
   }
 }
 
@@ -560,13 +651,21 @@ Q_UNUSED( parent );
   {
     QList< FtsHeadword >::iterator it = qBinaryFind( headwords.begin(), headwords.end(), hws.at( x ) );
     if( it != headwords.end() )
+    {
       it->dictIDs.push_back( hws.at( x ).dictIDs.front() );
+      for( QStringList::const_iterator itr = it->foundHiliteRegExps.constBegin();
+           itr != it->foundHiliteRegExps.constEnd(); ++itr )
+      {
+        if( !it->foundHiliteRegExps.contains( *itr ) )
+          it->foundHiliteRegExps.append( *itr );
+      }
+    }
     else
       temp.append( hws.at( x ) );
   }
 
   headwords.append( temp );
-  qSort( headwords );
+  std::sort( headwords.begin(),  headwords.end() );
 
   endResetModel();
   emit contentChanged();
@@ -594,6 +693,39 @@ int HeadwordsListModel::getDictIndex( QString const & id ) const
       return x;
   }
   return -1;
+}
+
+QString FtsHeadword::trimQuotes( QString const & str ) const
+{
+  QString trimmed( str );
+
+  int n = 0;
+  while( str[ n ] == '\"' || str[ n ] == '\'' )
+    n++;
+  if( n )
+    trimmed = trimmed.mid( n );
+
+  while( trimmed.endsWith( '\"' ) || trimmed.endsWith( '\'' ) )
+    trimmed.chop( 1 );
+
+  return trimmed;
+}
+
+bool FtsHeadword::operator <( FtsHeadword const & other ) const
+{
+  QString first = trimQuotes( headword );
+  QString second = trimQuotes( other.headword );
+
+  int result = first.localeAwareCompare( second );
+  if( result )
+    return result < 0;
+
+  // Headwords without quotes are equal
+
+  if( first.size() != headword.size() || second.size() != other.headword.size() )
+    return headword.localeAwareCompare( other.headword ) < 0;
+
+  return false;
 }
 
 } // namespace FTS

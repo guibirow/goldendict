@@ -33,6 +33,8 @@ private slots:
 
   void enableScanPopupToggled( bool );
   void enableScanPopupModifiersToggled( bool );
+  void showScanFlagToggled( bool b );
+  void on_scanPopupUnpinnedWindowFlags_currentIndexChanged( int index );
 
   void wholeAltClicked( bool );
   void wholeCtrlClicked( bool );
@@ -50,6 +52,10 @@ private slots:
   void on_useExternalPlayer_toggled( bool enabled );
 
   void customProxyToggled( bool );
+  void on_maxNetworkCacheSize_valueChanged( int value );
+
+  void on_collapseBigArticles_toggled( bool checked );
+  void on_limitInputPhraseLength_toggled( bool checked );
 
   void helpRequested();
   void closeHelp();

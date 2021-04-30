@@ -32,6 +32,15 @@ enum DslEncoding
   Utf8 // This is an extension. Detected solely by the UTF8 BOM.
 };
 
+struct DSLLangCode
+{
+  int code_id;
+  char code[ 3 ]; // ISO 639-1
+};
+
+string findCodeForDslId( int id );
+
+bool isAtSignFirst( wstring const & str );
 
 /// Parses the DSL language, representing it in its structural DOM form.
 struct ArticleDom
@@ -75,17 +84,20 @@ private:
   void closeTag( wstring const & name, list< Node * > & stack,
                  bool warn = true );
 
-  wchar const * stringPos;
+  bool atSignFirstInLine();
+
+  wchar const * stringPos, * lineStartPos;
 
   class eot {};
 
   wchar ch;
   bool escaped;
   unsigned transcriptionCount; // >0 = inside a [t] tag
+  unsigned mediaCount; // >0 = inside a [s] tag
 
-  void nextChar() throw( eot );
+  void nextChar() THROW_SPEC( eot );
 
-  /// Infomation for diagnostic purposes
+  /// Information for diagnostic purposes
   string dictionaryName;
   wstring headword;
 };
@@ -94,8 +106,8 @@ private:
 class DslIconv: public Iconv
 {
 public:
-  DslIconv( DslEncoding ) throw( Iconv::Ex );
-  void reinit( DslEncoding ) throw( Iconv::Ex );
+  DslIconv( DslEncoding ) THROW_SPEC( Iconv::Ex );
+  void reinit( DslEncoding ) THROW_SPEC( Iconv::Ex );
 
   /// Returns a name to be passed to iconv for the given dsl encoding.
   static char const * getEncodingNameFor( DslEncoding );
@@ -110,6 +122,7 @@ class DslScanner
   DslIconv iconv;
   wstring dictionaryName;
   wstring langFrom, langTo;
+  wstring soundDictionary;
   char readBuffer[ 65536 ];
   char * readBufferPtr;
   size_t readBufferLeft;
@@ -125,7 +138,7 @@ public:
   DEF_EX( exUnknownCodePage, "The .dsl file specified an unknown code page", Ex )
   DEF_EX( exEncodingError, "Encoding error", Ex ) // Should never happen really
 
-  DslScanner( string const & fileName ) throw( Ex, Iconv::Ex );
+  DslScanner( string const & fileName ) THROW_SPEC( Ex, Iconv::Ex );
   ~DslScanner() throw();
 
   /// Returns the detected encoding of this file.
@@ -144,16 +157,20 @@ public:
   wstring const & getLangTo() const
   { return langTo; }
 
+  /// Returns the preferred external dictionary with sounds, as was read from file's headers.
+  wstring const & getSoundDictionaryName() const
+  { return soundDictionary; }
+
   /// Reads next line from the file. Returns true if reading succeeded --
   /// the string gets stored in the one passed, along with its physical
   /// file offset in the file (the uncompressed one if the file is compressed).
   /// If end of file is reached, false is returned.
   /// Reading begins from the first line after the headers (ones which start
   /// with #).
-  bool readNextLine( wstring &, size_t & offset ) throw( Ex, Iconv::Ex );
+  bool readNextLine( wstring &, size_t & offset ) THROW_SPEC( Ex, Iconv::Ex );
 
   /// Similar readNextLine but strip all DSL comments {{...}}
-  bool readNextLineWithoutComments( wstring &, size_t & offset ) throw( Ex, Iconv::Ex );
+  bool readNextLineWithoutComments( wstring &, size_t & offset ) THROW_SPEC( Ex, Iconv::Ex );
 
   /// Returns the number of lines read so far from the file.
   unsigned getLinesRead() const

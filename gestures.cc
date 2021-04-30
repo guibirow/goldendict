@@ -45,7 +45,8 @@ QSwipeGesture::SwipeDirection getVerticalDirection( qreal angle )
   return QSwipeGesture::NoDirection;
 }
 
-GDPinchGesture::GDPinchGesture() :
+GDPinchGesture::GDPinchGesture( QObject * parent ) :
+QGesture( parent ),
 isNewSequence( true )
 {
 }
@@ -55,7 +56,7 @@ QGesture * GDPinchGestureRecognizer::create( QObject * pTarget )
   if ( pTarget && pTarget->isWidgetType()) {
     static_cast< QWidget * >( pTarget )->setAttribute( Qt::WA_AcceptTouchEvents );
   }
-  QGesture *pGesture = new GDPinchGesture;
+  QGesture *pGesture = new GDPinchGesture( pTarget );
   return pGesture;
 }
 
@@ -68,7 +69,6 @@ QGestureRecognizer::Result GDPinchGestureRecognizer::recognize( QGesture * state
                                                                 QObject *,
                                                                 QEvent * event)
 {
-  const QTouchEvent *ev = static_cast< const QTouchEvent * >( event );
   QGestureRecognizer::Result result = QGestureRecognizer::Ignore;
   GDPinchGesture * gest = static_cast< GDPinchGesture * >( state );
 
@@ -92,6 +92,7 @@ QGestureRecognizer::Result GDPinchGestureRecognizer::recognize( QGesture * state
     case QEvent::TouchUpdate:
       {
         gest->scaleChanged = false;
+        const QTouchEvent * const ev = static_cast< const QTouchEvent * >( event );
         fewTouchPointsPresented = ( ev->touchPoints().size() > 1 );
         if ( ev->touchPoints().size() == 2 )
         {
@@ -161,7 +162,8 @@ QGestureRecognizer::Result GDPinchGestureRecognizer::recognize( QGesture * state
 }
 
 
-GDSwipeGesture::GDSwipeGesture() :
+GDSwipeGesture::GDSwipeGesture( QObject * parent ) :
+QGesture( parent ),
 vertDirection( QSwipeGesture::NoDirection ),
 horizDirection( QSwipeGesture::NoDirection ),
 started( false )
@@ -173,7 +175,7 @@ QGesture * GDSwipeGestureRecognizer::create( QObject * pTarget )
   if ( pTarget && pTarget->isWidgetType() ) {
     static_cast< QWidget * >( pTarget )->setAttribute( Qt::WA_AcceptTouchEvents );
   }
-  QGesture *pGesture = new GDSwipeGesture;
+  QGesture *pGesture = new GDSwipeGesture( pTarget );
   return pGesture;
 }
 
@@ -211,7 +213,6 @@ QGestureRecognizer::Result GDSwipeGestureRecognizer::recognize( QGesture * state
                                                                 QEvent * event)
 {
   GDSwipeGesture * swipe = static_cast< GDSwipeGesture * >( state );
-  const QTouchEvent * ev = static_cast< const QTouchEvent * >( event );
   QGestureRecognizer::Result result = QGestureRecognizer::Ignore;
 
   switch( event->type() )
@@ -235,6 +236,7 @@ QGestureRecognizer::Result GDSwipeGestureRecognizer::recognize( QGesture * state
       }
     case QEvent::TouchUpdate:
       {
+        const QTouchEvent * const ev = static_cast< const QTouchEvent * >( event );
         fewTouchPointsPresented = ( ev->touchPoints().size() > 1 );
         if( !swipe->started )
           result = QGestureRecognizer::CancelGesture;

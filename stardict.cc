@@ -17,6 +17,7 @@
 #include "tiff.hh"
 #include "ftshelpers.hh"
 #include "wstring_qt.hh"
+#include "audiolink.hh"
 
 #include <zlib.h>
 #include <map>
@@ -40,8 +41,14 @@
 #include <QDebug>
 #include <QRegExp>
 #include <QStringList>
-
+#include <QDomDocument>
+#include <QDomNode>
 #include "ufile.hh"
+#include "qt4x5.hh"
+
+#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
+#include <QRegularExpression>
+#endif
 
 namespace Stardict {
 
@@ -81,7 +88,7 @@ struct Ifo
   string bookname;
   uint32_t wordcount, synwordcount, idxfilesize, idxoffsetbits;
   string sametypesequence, dicttype, description;
-  string copyright, author, email;
+  string copyright, author, email, website, date;
 
   Ifo( File::Class & );
 };
@@ -165,15 +172,16 @@ public:
   { return idxHeader.langTo; }
 
   virtual sptr< Dictionary::WordSearchRequest > findHeadwordsForSynonym( wstring const & )
-    throw( std::exception );
+    THROW_SPEC( std::exception );
 
   virtual sptr< Dictionary::DataRequest > getArticle( wstring const &,
                                                       vector< wstring > const & alts,
-                                                      wstring const & )
-    throw( std::exception );
+                                                      wstring const &,
+                                                      bool ignoreDiacritics )
+    THROW_SPEC( std::exception );
 
   virtual sptr< Dictionary::DataRequest > getResource( string const & name )
-    throw( std::exception );
+    THROW_SPEC( std::exception );
 
   virtual QString const& getDescription();
 
@@ -182,7 +190,9 @@ public:
   virtual sptr< Dictionary::DataRequest > getSearchResults( QString const & searchString,
                                                             int searchMode, bool matchCase,
                                                             int distanceBetweenWords,
-                                                            int maxResults );
+                                                            int maxResults,
+                                                            bool ignoreWordsOrder,
+                                                            bool ignoreDiacritics );
   virtual void getArticleText( uint32_t articleAddress, QString & headword, QString & text );
 
   virtual void makeFTSIndex(QAtomicInt & isCancelled, bool firstIteration );
@@ -199,7 +209,7 @@ protected:
 
 private:
 
-  /// Retrives the article's offset/size in .dict file, and its headword.
+  /// Retrieves the article's offset/size in .dict file, and its headword.
   void getArticleProps( uint32_t articleAddress,
                         string & headword,
                         uint32_t & offset, uint32_t & size );
@@ -302,6 +312,9 @@ void StardictDictionary::loadIcon() throw()
 
 string StardictDictionary::loadString( size_t size )
 {
+  if( size == 0 )
+    return string();
+
   vector< char > data( size );
 
   idx.read( &data.front(), data.size() );
@@ -327,6 +340,117 @@ void StardictDictionary::getArticleProps( uint32_t articleAddress,
   headword = articleData;
 }
 
+class PowerWordDataProcessor{
+    class PWSyntaxTranslate{
+    public:
+        PWSyntaxTranslate(const char* re, const char* replacement)
+#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
+            : _re(re, QRegularExpression::UseUnicodePropertiesOption )
+#else
+            : _re(re)
+#endif
+            , _replacement(replacement)
+        {
+        }
+#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
+        const QRegularExpression & re() const {
+#else
+        const QRegExp& re() const {
+#endif
+            return _re;
+        }
+        const QString & replacement() const {
+            return _replacement;
+        }
+    private:
+#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
+        QRegularExpression _re;
+#else
+        QRegExp _re;
+#endif
+        QString _replacement;
+    };
+public:
+    PowerWordDataProcessor(const char* resource, size_t size)
+        : _data(QString::fromUtf8(resource, size))
+    {
+    }
+
+    string process() {
+        QDomDocument doc;
+        QString ss;
+        ss = "<div class=\"sdct_k\">";
+        if (!doc.setContent(_data)) {
+            ss += _data ;
+        } else {
+            QStringList sl;
+            walkNode(doc.firstChild(), sl);
+
+            QStringListIterator itr(sl);
+            while (itr.hasNext()) {
+                QString s = itr.next();
+                translatePW(s);
+                ss += s;
+                ss += "<br>";
+            }
+        }
+        ss += "</div>";
+        QByteArray ba = ss.toUtf8();
+        return string(ba.data(), ba.size());
+    }
+private:
+    void walkNode(const QDomNode& e, QStringList& sl) {
+        if (e.isNull()) {
+            return;
+        }
+        if (e.isText()) {
+            sl.append(e.toText().data());
+        } else {
+            QDomNodeList l = e.childNodes();
+            for (int i = 0; i < l.size(); ++i) {
+                QDomNode n = l.at(i);
+                if (n.isText()) {
+                    sl.append(n.toText().data());
+                } else {
+                    walkNode(n, sl);
+                }
+            }
+        }
+    }
+
+    void translatePW(QString& s){
+        const int TRANSLATE_TBL_SIZE=5;
+        static PWSyntaxTranslate t[TRANSLATE_TBL_SIZE]={
+            PWSyntaxTranslate("&[bB]\\s*\\{([^\\{}&]+)\\}", "<B>\\1</B>"),
+            PWSyntaxTranslate("&[iI]\\s*\\{([^\\{}&]+)\\}", "<I>\\1</I>"),
+            PWSyntaxTranslate("&[uU]\\s*\\{([^\\{}&]+)\\}", "<U>\\1</U>"),
+            PWSyntaxTranslate("&[lL]\\s*\\{([^\\{}&]+)\\}", "<SPAN style=\"color:#0000ff\">\\1</SPAN>"),
+            PWSyntaxTranslate("&[2]\\s*\\{([^\\{}&]+)\\}", "<SPAN style=\"color:#0000ff\">\\1</SPAN>")
+        };
+
+        QString old;
+        while (s.compare(old) != 0) {
+            for (int i = 0; i < TRANSLATE_TBL_SIZE; ++i) {
+                PWSyntaxTranslate& a = t[i];
+                s.replace(a.re(), a.replacement());
+            }
+            old = s;
+        }
+#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
+        s.replace(QRegularExpression( "&.\\s*\\{",
+                                      QRegularExpression::UseUnicodePropertiesOption
+                                      | QRegularExpression::DotMatchesEverythingOption),
+                  "");
+#else
+        s.replace(QRegExp("&.\\s*\\{"), "");
+#endif
+        s.replace("}", "");
+    }
+private:
+    QString _data;
+};
+
+
 /// This function tries to make an html of the Stardict's resource typed
 /// 'type', contained in a block pointed to by 'resource', 'size' bytes long.
 string StardictDictionary::handleResource( char type, char const * resource, size_t size )
@@ -335,17 +459,181 @@ string StardictDictionary::handleResource( char type, char const * resource, siz
   switch( type )
   {
     case 'x': // Xdxf content
-      return Xdxf2Html::convert( string( resource, size ), Xdxf2Html::STARDICT, NULL, this );
+      return Xdxf2Html::convert( string( resource, size ), Xdxf2Html::STARDICT, NULL, this, &resourceZip );
     case 'h': // Html content
     {
-      string articleText = "<div class=\"sdct_h\">" + string( resource, size ) + "</div>";
+      QString articleText = QString( "<div class=\"sdct_h\">" ) + QString::fromUtf8( resource, size ) + "</div>";
 
-      return ( QString::fromUtf8( articleText.c_str() )
-               .replace( QRegExp( "(<\\s*img\\s+[^>]*src\\s*=\\s*[\"']+)((?!data:)[^\"']*)", Qt::CaseInsensitive ),
-                         "\\1bres://" + QString::fromStdString( getId() ) + "/\\2" )
-               .replace( QRegExp( "(<\\s*link\\s+[^>]*href\\s*=\\s*[\"']+)((?!data:)[^\"']*)", Qt::CaseInsensitive ),
-                         "\\1bres://" + QString::fromStdString( getId() ) + "/\\2" )
-               .toUtf8().data() );
+#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
+      QRegularExpression imgRe( "(<\\s*img\\s+[^>]*src\\s*=\\s*[\"']+)(?!(?:data|https?|ftp):)",
+                                QRegularExpression::CaseInsensitiveOption
+                                | QRegularExpression::InvertedGreedinessOption );
+      QRegularExpression linkRe( "(<\\s*link\\s+[^>]*href\\s*=\\s*[\"']+)(?!(?:data|https?|ftp):)",
+                                 QRegularExpression::CaseInsensitiveOption
+                                 | QRegularExpression::InvertedGreedinessOption );
+#else
+      QRegExp imgRe( "(<\\s*img\\s+[^>]*src\\s*=\\s*[\"']+)(?!(?:data|https?|ftp):)", Qt::CaseInsensitive );
+      imgRe.setMinimal( true );
+      QRegExp linkRe( "(<\\s*link\\s+[^>]*href\\s*=\\s*[\"']+)(?!(?:data|https?|ftp):)", Qt::CaseInsensitive );
+      linkRe.setMinimal( true );
+#endif
+
+      articleText.replace( imgRe , "\\1bres://" + QString::fromStdString( getId() ) + "/" )
+                 .replace( linkRe, "\\1bres://" + QString::fromStdString( getId() ) + "/" );
+
+      // Handle links to articles
+
+#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
+      QRegularExpression linksReg( "<a(\\s*[^>]*)href\\s*=\\s*['\"](bword://)?([^'\"]+)['\"]",
+                                   QRegularExpression::CaseInsensitiveOption );
+#else
+      QRegExp linksReg( "<a(\\s*[^>]*)href\\s*=\\s*['\"](bword://)?([^'\"]+)['\"]", Qt::CaseInsensitive );
+      linksReg.setMinimal( true );
+#endif
+
+      int pos = 0;
+#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
+      QString articleNewText;
+      QRegularExpressionMatchIterator it = linksReg.globalMatch( articleText );
+      while( it.hasNext() )
+      {
+        QRegularExpressionMatch match = it.next();
+        articleNewText += articleText.midRef( pos, match.capturedStart() - pos );
+        pos = match.capturedEnd();
+
+        QString link = match.captured( 3 );
+#else
+      while( pos >= 0 )
+      {
+        pos = linksReg.indexIn( articleText, pos );
+        if( pos < 0 )
+          break;
+
+        QString link = linksReg.cap( 3 );
+#endif
+        if( link.indexOf( ':' ) < 0 )
+        {
+          QString newLink;
+          if( link.indexOf( '#' ) < 0 )
+#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
+            newLink = QString( "<a" ) + match.captured( 1 ) + "href=\"bword:" + link + "\"";
+#else
+            newLink = QString( "<a" ) + linksReg.cap( 1 ) + "href=\"bword:" + link + "\"";
+#endif
+
+          // Anchors
+
+          if( link.indexOf( '#' ) > 0 )
+          {
+#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
+            newLink = QString( "<a" ) + match.captured( 1 ) + "href=\"gdlookup://localhost/" + link + "\"";
+#else
+            newLink = QString( "<a" ) + linksReg.cap( 1 ) + "href=\"gdlookup://localhost/" + link + "\"";
+#endif
+            newLink.replace( "#", "?gdanchor=" );
+          }
+
+          if( !newLink.isEmpty() )
+          {
+#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
+            articleNewText += newLink;
+#else
+            articleText.replace( pos, linksReg.cap( 0 ).size(), newLink );
+            pos += newLink.size();
+#endif
+          }
+          else
+#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
+            articleNewText += match.captured();
+#else
+            pos += linksReg.cap( 0 ).size();
+#endif
+        }
+        else
+#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
+          articleNewText += match.captured();
+      }
+      if( pos )
+      {
+        articleNewText += articleText.midRef( pos );
+        articleText = articleNewText;
+        articleNewText.clear();
+      }
+#else
+          pos += linksReg.cap( 0 ).size();
+      }
+#endif
+
+      // Handle "audio" tags
+
+#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
+      QRegularExpression audioRe( "<\\s*audio\\s*src\\s*=\\s*([\"']+)([^\"']+)([\"'])\\s*>(.*)</audio>",
+                                  QRegularExpression::CaseInsensitiveOption
+                                  | QRegularExpression::DotMatchesEverythingOption
+                                  | QRegularExpression::InvertedGreedinessOption );
+#else
+      QRegExp audioRe( "<\\s*audio\\s*src\\s*=\\s*([\"']+)([^\"']+)([\"'])\\s*>(.*)</audio>", Qt::CaseInsensitive );
+      audioRe.setMinimal( true );
+#endif
+
+      pos = 0;
+
+#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
+      it = audioRe.globalMatch( articleText );
+      while( it.hasNext() )
+      {
+        QRegularExpressionMatch match = it.next();
+        articleNewText += articleText.midRef( pos, match.capturedStart() - pos );
+        pos = match.capturedEnd();
+
+        QString src = match.captured( 2 );
+#else
+      while( pos >= 0 )
+      {
+        pos = audioRe.indexIn( articleText, pos );
+        if( pos < 0 )
+          break;
+
+        QString src = audioRe.cap( 2 );
+#endif
+        if( src.indexOf( "://" ) >= 0 )
+#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
+          articleNewText += match.captured();
+#else
+          pos += audioRe.cap( 0 ).length();
+#endif
+        else
+        {
+          std::string href = "\"gdau://" + getId() + "/" + src.toUtf8().data() + "\"";
+          QString newTag = QString::fromUtf8( ( addAudioLink( href, getId() ) + "<span class=\"sdict_h_wav\"><a href=" + href + ">" ).c_str() );
+#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
+          newTag += match.captured( 4 );
+          if( match.captured( 4 ).indexOf( "<img " ) < 0 )
+#else
+          newTag += audioRe.cap( 4 );
+          if( audioRe.cap( 4 ).indexOf( "<img " ) < 0 )
+#endif
+            newTag += " <img src=\"qrcx://localhost/icons/playsound.png\" border=\"0\" alt=\"Play\">";
+          newTag += "</a></span>";
+
+#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
+          articleNewText += newTag;
+#else
+          articleText.replace( pos, audioRe.cap( 0 ).length(), newTag );
+          pos += newTag.length();
+#endif
+        }
+      }
+#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
+      if( pos )
+      {
+        articleNewText += articleText.midRef( pos );
+        articleText = articleNewText;
+        articleNewText.clear();
+      }
+#endif
+
+      return ( articleText.toUtf8().data() );
     }
     case 'm': // Pure meaning, usually means preformatted text
       return "<div class=\"sdct_m\">" + Html::preformat( string( resource, size ), isToLanguageRTL() ) + "</div>";
@@ -365,8 +653,11 @@ string StardictDictionary::handleResource( char type, char const * resource, siz
     case 'y': // Chinese YinBiao or Japanese KANA. Examples are needed. For now,
               // just output as pure escaped utf8.
       return "<div class=\"sdct_y\">" + Html::escape( string( resource, size ) ) + "</div>";
-    case 'k': // KingSoft PowerWord data. We don't know how to handle that.
-      return "<div class=\"sdct_k\">" + Html::escape( string( resource, size ) ) + "</div>";
+    case 'k': // KingSoft PowerWord data.
+    {
+      PowerWordDataProcessor pwdp(resource, size);
+      return pwdp.process();
+    }
     case 'w': // MediaWiki markup. We don't handle this right now.
       return "<div class=\"sdct_w\">" + Html::escape( string( resource, size ) ) + "</div>";
     case 'n': // WordNet data. We don't know anything about it.
@@ -865,24 +1156,53 @@ QString const& StardictDictionary::getDescription()
     Ifo ifo( ifoFile );
 
     if( !ifo.copyright.empty() )
-      dictionaryDescription += "Copyright: "
-                               + QString::fromUtf8( ifo.copyright.c_str() )
-                                 .replace( "<br>", "\n", Qt::CaseInsensitive )
-                               + "\n\n";
+    {
+      QString copyright = QString::fromUtf8( ifo.copyright.c_str() )
+                          .replace( "<br>", "\n", Qt::CaseInsensitive );
+      dictionaryDescription += QString( QObject::tr( "Copyright: %1%2" ) )
+                              .arg( copyright )
+                              .arg( "\n\n" );
+    }
 
     if( !ifo.author.empty() )
-      dictionaryDescription += "Author: " + QString::fromUtf8( ifo.author.c_str() ) + "\n\n";
+    {
+      QString author = QString::fromUtf8( ifo.author.c_str() );
+      dictionaryDescription += QString( QObject::tr( "Author: %1%2" ) )
+                              .arg( author )
+                              .arg( "\n\n" );
+    }
 
     if( !ifo.email.empty() )
-      dictionaryDescription += "E-mail: " + QString::fromUtf8( ifo.email.c_str() ) + "\n\n";
+    {
+      QString email = QString::fromUtf8( ifo.email.c_str() );
+      dictionaryDescription += QString( QObject::tr( "E-mail: %1%2" ) )
+                               .arg( email )
+                               .arg( "\n\n" );
+    }
+
+    if( !ifo.website.empty() )
+    {
+      QString website = QString::fromUtf8( ifo.website.c_str() );
+      dictionaryDescription += QString( QObject::tr( "Website: %1%2" ) )
+                               .arg( website )
+                               .arg( "\n\n" );
+    }
+
+    if( !ifo.date.empty() )
+    {
+      QString date = QString::fromUtf8( ifo.date.c_str() );
+      dictionaryDescription += QString( QObject::tr( "Date: %1%2" ) )
+                               .arg( date )
+                               .arg( "\n\n" );
+    }
 
     if( !ifo.description.empty() )
     {
       QString desc = QString::fromUtf8( ifo.description.c_str() );
       desc.replace( "\t", "<br/>" );
-      desc.replace( "\\n", "\n" );
-      desc.replace( "<br>", "\n", Qt::CaseInsensitive );
-      dictionaryDescription += Html::unescape( desc );
+      desc.replace( "\\n", "<br/>" );
+      desc.replace( "<br>", "<br/>", Qt::CaseInsensitive );
+      dictionaryDescription += Html::unescape( desc, true );
     }
 
     if( dictionaryDescription.isEmpty() )
@@ -948,9 +1268,11 @@ void StardictDictionary::getArticleText( uint32_t articleAddress, QString & head
 sptr< Dictionary::DataRequest > StardictDictionary::getSearchResults( QString const & searchString,
                                                                       int searchMode, bool matchCase,
                                                                       int distanceBetweenWords,
-                                                                      int maxResults )
+                                                                      int maxResults,
+                                                                      bool ignoreWordsOrder,
+                                                                      bool ignoreDiacritics )
 {
-  return new FtsHelpers::FTSResultsRequest( *this, searchString,searchMode, matchCase, distanceBetweenWords, maxResults );
+  return new FtsHelpers::FTSResultsRequest( *this, searchString,searchMode, matchCase, distanceBetweenWords, maxResults, ignoreWordsOrder, ignoreDiacritics );
 }
 
 /// StardictDictionary::findHeadwordsForSynonym()
@@ -1018,7 +1340,7 @@ void StardictHeadwordsRequestRunnable::run()
 
 void StardictHeadwordsRequest::run()
 {
-  if ( isCancelled )
+  if ( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
   {
     finish();
     return;
@@ -1032,7 +1354,7 @@ void StardictHeadwordsRequest::run()
 
     for( unsigned x = 0; x < chain.size(); ++x )
     {
-      if ( isCancelled )
+      if ( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
       {
         finish();
         return;
@@ -1065,9 +1387,10 @@ void StardictHeadwordsRequest::run()
 
 sptr< Dictionary::WordSearchRequest >
   StardictDictionary::findHeadwordsForSynonym( wstring const & word )
-  throw( std::exception )
+  THROW_SPEC( std::exception )
 {
-  return new StardictHeadwordsRequest( word, *this );
+  return synonymSearchEnabled ? new StardictHeadwordsRequest( word, *this ) :
+                                Class::findHeadwordsForSynonym( word );
 }
 
 
@@ -1102,6 +1425,7 @@ class StardictArticleRequest: public Dictionary::DataRequest
   wstring word;
   vector< wstring > alts;
   StardictDictionary & dict;
+  bool ignoreDiacritics;
 
   QAtomicInt isCancelled;
   QSemaphore hasExited;
@@ -1110,8 +1434,9 @@ public:
 
   StardictArticleRequest( wstring const & word_,
                      vector< wstring > const & alts_,
-                     StardictDictionary & dict_ ):
-    word( word_ ), alts( alts_ ), dict( dict_ )
+                     StardictDictionary & dict_,
+                     bool ignoreDiacritics_ ):
+    word( word_ ), alts( alts_ ), dict( dict_ ), ignoreDiacritics( ignoreDiacritics_ )
   {
     QThreadPool::globalInstance()->start(
       new StardictArticleRequestRunnable( *this, hasExited ) );
@@ -1138,7 +1463,7 @@ void StardictArticleRequestRunnable::run()
 
 void StardictArticleRequest::run()
 {
-  if ( isCancelled )
+  if ( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
   {
     finish();
     return;
@@ -1146,13 +1471,13 @@ void StardictArticleRequest::run()
 
   try
   {
-    vector< WordArticleLink > chain = dict.findArticles( word );
+    vector< WordArticleLink > chain = dict.findArticles( word, ignoreDiacritics );
 
     for( unsigned x = 0; x < alts.size(); ++x )
     {
       /// Make an additional query for each alt
 
-      vector< WordArticleLink > altChain = dict.findArticles( alts[ x ] );
+      vector< WordArticleLink > altChain = dict.findArticles( alts[ x ], ignoreDiacritics );
 
       chain.insert( chain.end(), altChain.begin(), altChain.end() );
     }
@@ -1164,10 +1489,12 @@ void StardictArticleRequest::run()
                                       // by only allowing them to appear once.
 
     wstring wordCaseFolded = Folding::applySimpleCaseOnly( word );
+    if( ignoreDiacritics )
+      wordCaseFolded = Folding::applyDiacriticsOnly( wordCaseFolded );
 
     for( unsigned x = 0; x < chain.size(); ++x )
     {
-      if ( isCancelled )
+      if ( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
       {
         finish();
         return;
@@ -1189,6 +1516,8 @@ void StardictArticleRequest::run()
 
       wstring headwordStripped =
         Folding::applySimpleCaseOnly( Utf8::decode( headword ) );
+      if( ignoreDiacritics )
+        headwordStripped = Folding::applyDiacriticsOnly( headwordStripped );
 
       multimap< wstring, pair< string, string > > & mapToUse =
         ( wordCaseFolded == headwordStripped ) ?
@@ -1219,33 +1548,29 @@ void StardictArticleRequest::run()
 
     for( i = mainArticles.begin(); i != mainArticles.end(); ++i )
     {
-        result += dict.isFromLanguageRTL() ? "<h3 dir=\"rtl\">" : "<h3>";
+        result += dict.isFromLanguageRTL() ? "<h3 class=\"sdct_headwords\" dir=\"rtl\">" : "<h3 class=\"sdct_headwords\">";
         result += i->second.first;
         result += "</h3>";
         if( dict.isToLanguageRTL() )
-          result += "<span dir=\"rtl\">";
+          result += "<div style=\"display:inline;\" dir=\"rtl\">";
         result += i->second.second;
         result += cleaner;
         if( dict.isToLanguageRTL() )
-          result += "</span>";
+          result += "</div>";
     }
 
     for( i = alternateArticles.begin(); i != alternateArticles.end(); ++i )
     {
-        result += dict.isFromLanguageRTL() ? "<h3 dir=\"rtl\">" : "<h3>";
+        result += dict.isFromLanguageRTL() ? "<h3 class=\"sdct_headwords\" dir=\"rtl\">" : "<h3 class=\"sdct_headwords\">";
         result += i->second.first;
         result += "</h3>";
         if( dict.isToLanguageRTL() )
-          result += "<span dir=\"rtl\">";
+          result += "<div style=\"display:inline;\" dir=\"rtl\">";
         result += i->second.second;
         result += cleaner;
         if( dict.isToLanguageRTL() )
-          result += "</span>";
+          result += "</div>";
     }
-    result = QString::fromUtf8( result.c_str() )
-             .replace( QRegExp( "(<\\s*a\\s+[^>]*href\\s*=\\s*[\"']\\s*)bword://", Qt::CaseInsensitive ),
-                       "\\1bword:" )
-             .toUtf8().data();
 
     Mutex::Lock _( dataMutex );
 
@@ -1265,10 +1590,11 @@ void StardictArticleRequest::run()
 
 sptr< Dictionary::DataRequest > StardictDictionary::getArticle( wstring const & word,
                                                                 vector< wstring > const & alts,
-                                                                wstring const & )
-  throw( std::exception )
+                                                                wstring const &,
+                                                                bool ignoreDiacritics )
+  THROW_SPEC( std::exception )
 {
-  return new StardictArticleRequest( word, alts, *this );
+  return new StardictArticleRequest( word, alts, *this, ignoreDiacritics );
 }
 
 
@@ -1349,6 +1675,12 @@ Ifo::Ifo( File::Class & f ):
       else
       if ( char const * val = beginsWith( "email=", option ) )
         email = val;
+      else
+      if ( char const * val = beginsWith( "website=", option ) )
+        website = val;
+      else
+      if ( char const * val = beginsWith( "date=", option ) )
+        date = val;
     }
   }
   catch( File::exReadError & )
@@ -1424,7 +1756,7 @@ void StardictResourceRequestRunnable::run()
 void StardictResourceRequest::run()
 {
   // Some runnables linger enough that they are cancelled before they start
-  if ( isCancelled )
+  if ( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
   {
     finish();
     return;
@@ -1452,7 +1784,7 @@ void StardictResourceRequest::run()
 
       File::loadFromFile( n, data );
     }
-    catch( File::exCantOpen )
+    catch( File::exCantOpen & )
     {
       // Try reading from zip file
 
@@ -1507,12 +1839,73 @@ void StardictResourceRequest::run()
       Mutex::Lock _( dataMutex );
 
       QString css = QString::fromUtf8( data.data(), data.size() );
+
+      // Correct some url's
+
+      QString id = QString::fromUtf8( dict.getId().c_str() );
+      int pos = 0;
+
+#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
+      QRegularExpression links( "url\\(\\s*(['\"]?)([^'\"]*)(['\"]?)\\s*\\)",
+                                QRegularExpression::CaseInsensitiveOption );
+
+      QString newCSS;
+      QRegularExpressionMatchIterator it = links.globalMatch( css );
+      while( it.hasNext() )
+      {
+        QRegularExpressionMatch match = it.next();
+        newCSS += css.midRef( pos, match.capturedStart() - pos );
+        pos = match.capturedEnd();
+
+        QString url = match.captured( 2 );
+
+        if( url.indexOf( ":/" ) >= 0 || url.indexOf( "data:" ) >= 0)
+        {
+          // External link
+          newCSS += match.captured();
+          continue;
+        }
+
+        QString newUrl = QString( "url(" ) + match.captured( 1 ) + "bres://"
+                                           + id + "/" + url + match.captured( 3 ) + ")";
+        newCSS += newUrl;
+      }
+      if( pos )
+      {
+        newCSS += css.midRef( pos );
+        css = newCSS;
+        newCSS.clear();
+      }
+#else
+      QRegExp links( "url\\(\\s*(['\"]?)([^'\"]*)(['\"]?)\\s*\\)", Qt::CaseInsensitive, QRegExp::RegExp );
+      for( ; ; )
+      {
+        pos = links.indexIn( css, pos );
+        if( pos < 0 )
+          break;
+        QString url = links.cap( 2 );
+
+        if( url.indexOf( ":/" ) >= 0 || url.indexOf( "data:" ) >= 0)
+        {
+          // External link
+          pos += links.cap().size();
+          continue;
+        }
+
+        QString newUrl = QString( "url(" ) + links.cap( 1 ) + "bres://"
+                                           + id + "/" + url + links.cap( 3 ) + ")";
+        css.replace( pos, links.cap().size(), newUrl );
+        pos += newUrl.size();
+      }
+#endif
+
       dict.isolateCSS( css );
       QByteArray bytes = css.toUtf8();
       data.resize( bytes.size() );
       memcpy( &data.front(), bytes.constData(), bytes.size() );
     }
 
+    Mutex::Lock _( dataMutex );
     hasAnyData = true;
   }
   catch( std::exception &ex )
@@ -1529,7 +1922,7 @@ void StardictResourceRequest::run()
 }
 
 sptr< Dictionary::DataRequest > StardictDictionary::getResource( string const & name )
-  throw( std::exception )
+  THROW_SPEC( std::exception )
 {
   return new StardictResourceRequest( *this, name );
 }
@@ -1574,7 +1967,7 @@ static void handleIdxSynFile( string const & fileName,
                               IndexedWords & indexedWords,
                               ChunkedStorage::Writer & chunks,
                               vector< uint32_t > * articleOffsets,
-                              bool isSynFile )
+                              bool isSynFile, bool parseHeadwords )
 {
   gzFile stardictIdx = gd_gzopen( fileName.c_str() );
   if ( !stardictIdx )
@@ -1697,7 +2090,10 @@ static void handleIdxSynFile( string const & fileName,
 
     // Insert new entry into an index
 
-    indexedWords.addWord( Utf8::decode( word ), offset );
+    if( parseHeadwords )
+      indexedWords.addWord( Utf8::decode( word ), offset );
+    else
+      indexedWords.addSingleWord( Utf8::decode( word ), offset );
   }
 
   GD_DPRINTF( "%u entires made\n", (unsigned) indexedWords.size() );
@@ -1707,8 +2103,9 @@ static void handleIdxSynFile( string const & fileName,
 vector< sptr< Dictionary::Class > > makeDictionaries(
                                       vector< string > const & fileNames,
                                       string const & indicesDir,
-                                      Dictionary::Initializing & initializing )
-  throw( std::exception )
+                                      Dictionary::Initializing & initializing,
+                                      unsigned maxHeadwordsToExpand )
+  THROW_SPEC( std::exception )
 {
   vector< sptr< Dictionary::Class > > dictionaries;
 
@@ -1738,9 +2135,9 @@ vector< sptr< Dictionary::Class > > makeDictionaries(
       string zipFileName;
       string baseName = FsEncoding::dirname( idxFileName ) + FsEncoding::separator();
 
-      if ( File::tryPossibleName( baseName + "res.zip", zipFileName ) ||
-           File::tryPossibleName( baseName + "RES.ZIP", zipFileName ) ||
-           File::tryPossibleName( baseName + "res" + FsEncoding::separator() + "res.zip", zipFileName ) )
+      if ( File::tryPossibleZipName( baseName + "res.zip", zipFileName ) ||
+           File::tryPossibleZipName( baseName + "RES.ZIP", zipFileName ) ||
+           File::tryPossibleZipName( baseName + "res" + FsEncoding::separator() + "res.zip", zipFileName ) )
         dictFiles.push_back( zipFileName );
 
       string dictId = Dictionary::makeDictionaryId( dictFiles );
@@ -1806,7 +2203,8 @@ vector< sptr< Dictionary::Class > > makeDictionaries(
 
         // Load indices
         if ( !ifo.synwordcount )
-          handleIdxSynFile( idxFileName, indexedWords, chunks, 0, false );
+          handleIdxSynFile( idxFileName, indexedWords, chunks, 0, false,
+                            !maxHeadwordsToExpand || ifo.wordcount < maxHeadwordsToExpand );
         else
         {
           vector< uint32_t > articleOffsets;
@@ -1814,10 +2212,12 @@ vector< sptr< Dictionary::Class > > makeDictionaries(
           articleOffsets.reserve( ifo.wordcount );
 
           handleIdxSynFile( idxFileName, indexedWords, chunks, &articleOffsets,
-                            false );
+                            false,
+                            !maxHeadwordsToExpand || ( ifo.wordcount + ifo.synwordcount ) < maxHeadwordsToExpand );
 
           handleIdxSynFile( synFileName, indexedWords, chunks, &articleOffsets,
-                            true );
+                            true,
+                            !maxHeadwordsToExpand || ( ifo.wordcount + ifo.synwordcount ) < maxHeadwordsToExpand );
         }
 
         // Finish with the chunks

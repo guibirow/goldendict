@@ -3,13 +3,18 @@
 
 #include <QtGui>
 
-#ifdef Q_WS_X11
+#ifdef HAVE_X11
 
 #include <set>
 
 #include <X11/Xlib.h>
 #include <X11/extensions/record.h>
 #include <QX11Info>
+#include <X11/Xlibint.h>
+
+#undef Bool
+#undef min
+#undef max
 
 #endif
 
@@ -20,12 +25,17 @@
 
 #include "ex.hh"
 #include "qtsingleapplication.h"
+#include "qt4x5.hh"
+
+#ifdef Q_OS_WIN32
+#include "hotkeys.h"
+#endif
 
 //////////////////////////////////////////////////////////////////////////
 
 struct HotkeyStruct
 {
-  HotkeyStruct() {};
+  HotkeyStruct() {}
   HotkeyStruct( quint32 key, quint32 key2, quint32 modifier, int handle, int id );
 
   quint32 key, key2;
@@ -60,6 +70,10 @@ public:
 
   /// Unregisters everything
   void unregister();
+#ifdef Q_OS_WIN32
+  bool handleViaDLL()
+  { return dllHandler.hDLLHandle != 0; }
+#endif
 
 signals:
 
@@ -88,6 +102,17 @@ private:
 #ifdef Q_OS_WIN32
   virtual bool winEvent ( MSG * message, long * result );
   HWND hwnd;
+
+  struct DLL_HANDLER
+  {
+    HMODULE hDLLHandle;
+    setHookProc setHook;
+    removeHookProc removeHook;
+    setHotkeysProc setHotkeys;
+    clearHotkeysProc clearHotkeys;
+  };
+
+  DLL_HANDLER dllHandler;
 
 #elif defined(Q_OS_MAC)
 
@@ -186,8 +211,28 @@ public:
   {}
 };
 
-class QHotkeyApplication : public QtSingleApplication
+// Intermediate class to avoid misunderstanding of #ifdef's
+// by Qt meta-object compiler
+
+class QIntermediateApplication : public QtSingleApplication
+#if defined( Q_OS_WIN ) && IS_QT_5
+        , public QAbstractNativeEventFilter
+#endif
 {
+public:
+  QIntermediateApplication( int & argc, char ** argv ) :
+    QtSingleApplication( argc, argv )
+  {}
+
+  QIntermediateApplication( QString const & id, int & argc, char ** argv ) :
+    QtSingleApplication( id, argc, argv )
+  {}
+};
+
+class QHotkeyApplication : public QIntermediateApplication
+{
+  Q_OBJECT
+
   friend class HotkeyWrapper;
 
   QList< DataCommitter * > dataCommitters;
@@ -199,22 +244,29 @@ public:
   void addDataCommiter( DataCommitter & );
   void removeDataCommiter( DataCommitter & );
 
+private slots:
   /// This calls all data committers.
-  virtual void commitData( QSessionManager & );
+  void hotkeyAppCommitData( QSessionManager & );
+
+  void hotkeyAppSaveState( QSessionManager & );
 
 protected:
   void registerWrapper(HotkeyWrapper *wrapper);
   void unregisterWrapper(HotkeyWrapper *wrapper);
 
 #ifdef Q_OS_WIN32
+#if IS_QT_5
+  virtual bool nativeEventFilter( const QByteArray & eventType, void * message, long * result );
+#else // IS_QT_5
   virtual bool winEventFilter ( MSG * message, long * result );
+#endif // IS_QT_5
+
   QWidget * mainWindow;
 public:
   void setMainWindow( QWidget * widget )
   { mainWindow = widget; }
 protected:
-#endif
-
+#endif // Q_OS_WIN32
   QList<HotkeyWrapper*> hotkeyWrappers;
 };
 

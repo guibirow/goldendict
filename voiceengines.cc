@@ -10,10 +10,11 @@
 #include <string>
 #include <map>
 
-#include <QUrl>
 #include <QDir>
 #include <QFileInfo>
 #include <QCryptographicHash>
+
+#include "qt4x5.hh"
 
 namespace VoiceEngines
 {
@@ -57,12 +58,12 @@ public:
 
   virtual sptr< WordSearchRequest > prefixMatch( wstring const & word,
                                                  unsigned long maxResults )
-    throw( std::exception );
+    THROW_SPEC( std::exception );
 
   virtual sptr< DataRequest > getArticle( wstring const &,
                                           vector< wstring > const & alts,
-                                          wstring const & )
-    throw( std::exception );
+                                          wstring const &, bool )
+    THROW_SPEC( std::exception );
 
 protected:
 
@@ -71,7 +72,7 @@ protected:
 
 sptr< WordSearchRequest > VoiceEnginesDictionary::prefixMatch( wstring const & /*word*/,
                                                                unsigned long /*maxResults*/ )
-  throw( std::exception )
+  THROW_SPEC( std::exception )
 {
   WordSearchRequestInstant * sr = new WordSearchRequestInstant();
   sr->setUncertain( true );
@@ -79,8 +80,8 @@ sptr< WordSearchRequest > VoiceEnginesDictionary::prefixMatch( wstring const & /
 }
 
 sptr< Dictionary::DataRequest > VoiceEnginesDictionary::getArticle(
-  wstring const & word, vector< wstring > const &, wstring const & )
-  throw( std::exception )
+  wstring const & word, vector< wstring > const &, wstring const &, bool )
+  THROW_SPEC( std::exception )
 {
   string result;
   string wordUtf8( Utf8::encode( word ) );
@@ -90,10 +91,10 @@ sptr< Dictionary::DataRequest > VoiceEnginesDictionary::getArticle(
   QUrl url;
   url.setScheme( "gdtts" );
   url.setHost( "localhost" );
-  url.setPath( QString::fromUtf8( wordUtf8.c_str() ) );
+  url.setPath( Qt4x5::Url::ensureLeadingSlash( QString::fromUtf8( wordUtf8.c_str() ) ) );
   QList< QPair<QString, QString> > query;
   query.push_back( QPair<QString, QString>( "engine", QString::fromStdString( getId() ) ) );
-  url.setQueryItems( query );
+  Qt4x5::Url::setQueryItems( url, query );
 
   string encodedUrl = url.toEncoded().data();
   string ref = string( "\"" ) + encodedUrl + "\"";
@@ -127,7 +128,7 @@ void VoiceEnginesDictionary::loadIcon() throw()
 
 vector< sptr< Dictionary::Class > > makeDictionaries(
   Config::VoiceEngines const & voiceEngines )
-  throw( std::exception )
+  THROW_SPEC( std::exception )
 {
   vector< sptr< Dictionary::Class > > result;
 

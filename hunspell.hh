@@ -4,6 +4,10 @@
 #ifndef __HUNSPELL_HH_INCLUDED__
 #define __HUNSPELL_HH_INCLUDED__
 
+#ifdef _MSC_VER
+#define HUNSPELL_STATIC
+#endif
+
 #include "dictionary.hh"
 #include "config.hh"
 
@@ -30,7 +34,7 @@ struct DataFiles
 vector< DataFiles > findDataFiles( QString const & path );
 
 vector< sptr< Dictionary::Class > > makeDictionaries( Config::Hunspell const & )
-  throw( std::exception );
+  THROW_SPEC( std::exception );
 
 }
 

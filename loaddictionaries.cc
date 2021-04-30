@@ -30,9 +30,14 @@
 #include "zim.hh"
 #include "dictserver.hh"
 #include "slob.hh"
+#include "gls.hh"
 
 #ifndef NO_EPWING_SUPPORT
 #include "epwing.hh"
+#endif
+
+#ifdef MAKE_CHINESE_CONVERSION_SUPPORT
+#include "chinese.hh"
 #endif
 
 #include <QMessageBox>
@@ -50,14 +55,15 @@ LoadDictionaries::LoadDictionaries( Config::Class const & cfg ):
   transliteration( cfg.transliteration ),
   exceptionText( "Load did not finish" ), // Will be cleared upon success
   maxPictureWidth( cfg.maxPictureWidth ),
-  maxHeadwordSize( cfg.maxHeadwordSize )
+  maxHeadwordSize( cfg.maxHeadwordSize ),
+  maxHeadwordToExpand( cfg.maxHeadwordsToExpand )
 {
   // Populate name filters
 
   nameFilters << "*.bgl" << "*.ifo" << "*.lsa" << "*.dat"
               << "*.dsl" << "*.dsl.dz"  << "*.index" << "*.xdxf"
               << "*.xdxf.dz" << "*.dct" << "*.aar" << "*.zips"
-              << "*.mdx"
+              << "*.mdx" << "*.gls" << "*.gls.dz"
 #ifdef MAKE_ZIM_SUPPORT
               << "*.zim" << "*.zimaa" << "*.slob"
 #endif
@@ -111,7 +117,7 @@ void LoadDictionaries::handlePath( Config::Path const & path )
   for( QFileInfoList::const_iterator i = entries.constBegin();
        i != entries.constEnd(); ++i )
   {
-    QString fullName = i->canonicalFilePath();
+    QString fullName = i->absoluteFilePath();
 
     if ( path.recursive && i->isDir() )
     {
@@ -135,7 +141,7 @@ void LoadDictionaries::handlePath( Config::Path const & path )
 
   {
     vector< sptr< Dictionary::Class > > stardictDictionaries =
-      Stardict::makeDictionaries( allFiles, FsEncoding::encode( Config::getIndexDir() ), *this );
+      Stardict::makeDictionaries( allFiles, FsEncoding::encode( Config::getIndexDir() ), *this, maxHeadwordToExpand );
 
     dictionaries.insert( dictionaries.end(), stardictDictionaries.begin(),
                          stardictDictionaries.end() );
@@ -181,7 +187,7 @@ void LoadDictionaries::handlePath( Config::Path const & path )
   }
   {
     vector< sptr< Dictionary::Class > > aardDictionaries =
-      Aard::makeDictionaries( allFiles, FsEncoding::encode( Config::getIndexDir() ), *this );
+      Aard::makeDictionaries( allFiles, FsEncoding::encode( Config::getIndexDir() ), *this, maxHeadwordToExpand );
 
     dictionaries.insert( dictionaries.end(), aardDictionaries.begin(),
                          aardDictionaries.end() );
@@ -200,17 +206,24 @@ void LoadDictionaries::handlePath( Config::Path const & path )
     dictionaries.insert( dictionaries.end(), mdxDictionaries.begin(),
                          mdxDictionaries.end() );
   }
+  {
+    vector< sptr< Dictionary::Class > > glsDictionaries =
+      Gls::makeDictionaries( allFiles, FsEncoding::encode( Config::getIndexDir() ), *this );
+
+    dictionaries.insert( dictionaries.end(), glsDictionaries.begin(),
+                         glsDictionaries.end() );
+  }
 #ifdef MAKE_ZIM_SUPPORT
   {
     vector< sptr< Dictionary::Class > > zimDictionaries =
-      Zim::makeDictionaries( allFiles, FsEncoding::encode( Config::getIndexDir() ), *this );
+      Zim::makeDictionaries( allFiles, FsEncoding::encode( Config::getIndexDir() ), *this, maxHeadwordToExpand );
 
     dictionaries.insert( dictionaries.end(), zimDictionaries.begin(),
                          zimDictionaries.end() );
   }
   {
     vector< sptr< Dictionary::Class > > slobDictionaries =
-      Slob::makeDictionaries( allFiles, FsEncoding::encode( Config::getIndexDir() ), *this );
+      Slob::makeDictionaries( allFiles, FsEncoding::encode( Config::getIndexDir() ), *this, maxHeadwordToExpand );
 
     dictionaries.insert( dictionaries.end(), slobDictionaries.begin(),
                          slobDictionaries.end() );
@@ -271,7 +284,18 @@ void loadDictionaries( QWidget * parent, bool showInitially,
 
   dictionaries = loadDicts.getDictionaries();
 
-  ///// We create transliterations syncronously since they are very simple
+  ///// We create transliterations synchronously since they are very simple
+
+#ifdef MAKE_CHINESE_CONVERSION_SUPPORT
+  // Make Chinese conversion
+  {
+    vector< sptr< Dictionary::Class > > chineseDictionaries =
+      Chinese::makeDictionaries( cfg.transliteration.chinese );
+
+    dictionaries.insert( dictionaries.end(), chineseDictionaries.begin(),
+                         chineseDictionaries.end() );
+  }
+#endif
 
   // Make Romaji
   {
@@ -301,7 +325,7 @@ void loadDictionaries( QWidget * parent, bool showInitially,
     dictionaries.insert( dictionaries.end(), dicts.begin(), dicts.end() );
   }
 
-  ///// We create MediaWiki dicts syncronously, since they use netmgr
+  ///// We create MediaWiki dicts synchronously, since they use netmgr
 
   {
     vector< sptr< Dictionary::Class > > dicts =
@@ -310,10 +334,10 @@ void loadDictionaries( QWidget * parent, bool showInitially,
     dictionaries.insert( dictionaries.end(), dicts.begin(), dicts.end() );
   }
 
-  ///// WebSites are very simple, no need to create them asyncronously
+  ///// WebSites are very simple, no need to create them asynchronously
   {
     vector< sptr< Dictionary::Class > > dicts =
-      WebSite::makeDictionaries( cfg.webSites );
+      WebSite::makeDictionaries( cfg.webSites, dictNetMgr );
 
     dictionaries.insert( dictionaries.end(), dicts.begin(), dicts.end() );
   }
@@ -357,7 +381,9 @@ void loadDictionaries( QWidget * parent, bool showInitially,
   set< string > ids;
   std::pair< std::set< string >::iterator, bool > ret;
 
+#if QT_VERSION < QT_VERSION_CHECK(5, 0, 0)
   QTextCodec::setCodecForCStrings( QTextCodec::codecForName( "UTF8" ) );
+#endif
 
   for( unsigned x = dictionaries.size(); x--; )
   {

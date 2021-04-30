@@ -28,6 +28,8 @@ GroupComboBox::GroupComboBox( QWidget * parent ): QComboBox( parent ),
   connect( &selectPreviousAction, SIGNAL( triggered() ),
            this, SLOT( selectPreviousGroup() ) );
   addAction( &selectPreviousAction );
+
+  setMaxVisibleItems( 30 );
 }
 
 void GroupComboBox::fill( Instances::Groups const & groups )
@@ -81,9 +83,16 @@ bool GroupComboBox::event( QEvent * event )
   }
 
   return QComboBox::event( event );
-
 }
 
+QList< QAction * > GroupComboBox::getExternActions()
+{
+  QList< QAction * > list;
+  list.append( &popupAction );
+  list.append( &selectNextAction );
+  list.append( &selectPreviousAction );
+  return list;
+}
 
 void GroupComboBox::setCurrentGroup( unsigned id )
 {

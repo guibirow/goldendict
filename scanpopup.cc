@@ -2,9 +2,6 @@
  * Part of GoldenDict. Licensed under GPLv3 or later, see the LICENSE file */
 
 #include "scanpopup.hh"
-#include "folding.hh"
-#include "wstring_qt.hh"
-#include <QUrl>
 #include <QCursor>
 #include <QPixmap>
 #include <QBitmap>
@@ -25,18 +22,49 @@ using std::wstring;
 
 /// We use different window flags under Windows and X11 due to slight differences
 /// in their behavior on those platforms.
-static Qt::WindowFlags popupWindowFlags =
+static const Qt::WindowFlags defaultUnpinnedWindowFlags =
 
-#if defined (Q_OS_WIN) || defined (Q_OS_MAC)
+#if defined (Q_OS_WIN) || ( defined (Q_OS_MAC) && QT_VERSION < QT_VERSION_CHECK( 5, 3, 0 ) )
 Qt::Tool | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint
 #else
 Qt::Popup
 #endif
 ;
 
+static const Qt::WindowFlags pinnedWindowFlags =
+#ifdef HAVE_X11
+/// With the Qt::Dialog flag, scan popup is always on top of the main window
+/// on Linux/X11 with Qt 4, Qt 5 since version 5.12.1 (QTBUG-74309).
+/// Qt::Window allows to use the scan popup and the main window independently.
+Qt::Window
+#else
+Qt::Dialog
+#endif
+;
+
+#ifdef HAVE_X11
+static bool ownsClipboardMode( QClipboard::Mode mode )
+{
+  const QClipboard & clipboard = *QApplication::clipboard();
+  switch( mode )
+  {
+    case QClipboard::Clipboard:
+      return clipboard.ownsClipboard();
+    case QClipboard::Selection:
+      return clipboard.ownsSelection();
+    case QClipboard::FindBuffer:
+      return clipboard.ownsFindBuffer();
+  }
+
+  gdWarning( "Unknown clipboard mode: %d\n", static_cast< int >( mode ) );
+  return false;
+}
+#endif
+
 ScanPopup::ScanPopup( QWidget * parent,
                       Config::Class & cfg_,
-                      ArticleNetworkAccessManager & articleNetMgr,                      
+                      ArticleNetworkAccessManager & articleNetMgr,
+                      AudioPlayerPtr const & audioPlayer_,
                       std::vector< sptr< Dictionary::Class > > const & allDictionaries_,
                       Instances::Groups const & groups_,
                       History & history_ ):
@@ -54,7 +82,9 @@ ScanPopup::ScanPopup( QWidget * parent,
   dictionaryBar( this, configEvents, cfg.editDictionaryCommandLine, cfg.preferences.maxDictionaryRefsInContextMenu ),
   mouseEnteredOnce( false ),
   mouseIntercepted( false ),
-  hideTimer( this )
+  hideTimer( this ),
+  starIcon( ":/icons/star.png" ),
+  blueStarIcon( ":/icons/star_blue.png" )
 {
   ui.setupUi( this );
 
@@ -71,8 +101,8 @@ ScanPopup::ScanPopup( QWidget * parent,
 
   ui.queryError->hide();
 
-  definition = new ArticleView( ui.outerFrame, articleNetMgr, allDictionaries,
-                                groups, true, cfg,
+  definition = new ArticleView( ui.outerFrame, articleNetMgr, audioPlayer_,
+                                allDictionaries, groups, true, cfg,
                                 openSearchAction,
                                 dictionaryBar.toggleViewAction()
                                 );
@@ -92,8 +122,10 @@ ScanPopup::ScanPopup( QWidget * parent,
   connect( definition, SIGNAL( typingEvent( QString const & ) ),
            this, SLOT( typingEvent( QString const & ) ) );
 
-  applyZoomFactor();
-  
+  wordListDefaultFont = ui.translateBox->wordList()->font();
+  translateLineDefaultFont = ui.translateBox->font();
+  groupListDefaultFont = ui.groupList->font();
+
   ui.mainLayout->addWidget( definition );
 
   ui.translateBox->wordList()->attachFinder( &wordFinder );
@@ -154,17 +186,24 @@ ScanPopup::ScanPopup( QWidget * parent,
   if ( cfg.popupWindowState.size() )
     restoreState( cfg.popupWindowState, 1 );
 
+  ui.onTopButton->setChecked( cfg.popupWindowAlwaysOnTop );
+  ui.onTopButton->setVisible( cfg.pinPopupWindow );
+  connect( ui.onTopButton, SIGNAL( clicked( bool ) ), this, SLOT( alwaysOnTopClicked( bool ) ) );
+
   ui.pinButton->setChecked( cfg.pinPopupWindow );
 
   if ( cfg.pinPopupWindow )
   {
     dictionaryBar.setMovable( true );
-    setWindowFlags( Qt::Dialog );
+    Qt::WindowFlags flags = pinnedWindowFlags;
+    if( cfg.popupWindowAlwaysOnTop )
+      flags |= Qt::WindowStaysOnTopHint;
+    setWindowFlags( flags );
   }
   else
   {
     dictionaryBar.setMovable( false );
-    setWindowFlags( popupWindowFlags );
+    setWindowFlags( unpinnedWindowFlags() );
   }
 
   connect( &configEvents, SIGNAL( mutedDictionariesChanged() ),
@@ -197,6 +236,11 @@ ScanPopup::ScanPopup( QWidget * parent,
   connect( &focusTranslateLineAction, SIGNAL( triggered() ),
            this, SLOT( focusTranslateLine() ) );
 
+  QAction * const focusArticleViewAction = new QAction( this );
+  focusArticleViewAction->setShortcutContext( Qt::WidgetWithChildrenShortcut );
+  focusArticleViewAction->setShortcut( QKeySequence( "Ctrl+N" ) );
+  addAction( focusArticleViewAction );
+  connect( focusArticleViewAction, SIGNAL( triggered() ), definition, SLOT( focus() ) );
 
   switchExpandModeAction.setShortcuts( QList< QKeySequence >() <<
                                        QKeySequence( Qt::CTRL + Qt::Key_8 ) <<
@@ -222,7 +266,10 @@ ScanPopup::ScanPopup( QWidget * parent,
   connect( definition, SIGNAL( statusBarMessage( QString const &, int, QPixmap const & ) ),
            this, SLOT( showStatusBarMessage( QString const &, int, QPixmap const & ) ) );
 
-#ifdef Q_WS_X11
+  connect( definition, SIGNAL( titleChanged(  ArticleView *, QString const & ) ),
+           this, SLOT( titleChanged(  ArticleView *, QString const & ) ) );
+
+#ifdef HAVE_X11
   connect( QApplication::clipboard(), SIGNAL( changed( QClipboard::Mode ) ),
            this, SLOT( clipboardChanged( QClipboard::Mode ) ) );
 #else
@@ -271,14 +318,33 @@ ScanPopup::ScanPopup( QWidget * parent,
   grabGesture( Gestures::GDPinchGestureType );
   grabGesture( Gestures::GDSwipeGestureType );
 #endif
+
+#ifdef HAVE_X11
+  scanFlag = new ScanFlag( this );
+
+  connect( this, SIGNAL( showScanFlag( bool ) ),
+           scanFlag, SLOT( showScanFlag() ) );
+
+  connect( this, SIGNAL( hideScanFlag() ),
+           scanFlag, SLOT( hideWindow() ) );
+
+  connect( scanFlag, SIGNAL( showScanPopup() ),
+           this, SLOT( showEngagePopup() ) );
+
+  delayTimer.setSingleShot( true );
+  delayTimer.setInterval( 200 );
+
+  connect( &delayTimer, SIGNAL( timeout() ),
+    this, SLOT( delayShow() ) );
+#endif
+
+  applyZoomFactor();
+  applyWordsZoomLevel();
 }
 
 ScanPopup::~ScanPopup()
 {
-  // Save state, geometry and pin status
-  cfg.popupWindowState = saveState( 1 );
-  cfg.popupWindowGeometry = saveGeometry();
-  cfg.pinPopupWindow = ui.pinButton->isChecked();
+  saveConfigData();
 
   disableScanning();
 
@@ -286,6 +352,15 @@ ScanPopup::~ScanPopup()
   ungrabGesture( Gestures::GDPinchGestureType );
   ungrabGesture( Gestures::GDSwipeGestureType );
 #endif
+}
+
+void ScanPopup::saveConfigData()
+{
+  // Save state, geometry and pin status
+  cfg.popupWindowState = saveState( 1 );
+  cfg.popupWindowGeometry = saveGeometry();
+  cfg.pinPopupWindow = ui.pinButton->isChecked();
+  cfg.popupWindowAlwaysOnTop = ui.onTopButton->isChecked();
 }
 
 void ScanPopup::enableScanning()
@@ -309,6 +384,84 @@ void ScanPopup::disableScanning()
 void ScanPopup::applyZoomFactor()
 {
   definition->setZoomFactor( cfg.preferences.zoomFactor );
+}
+
+void ScanPopup::applyWordsZoomLevel()
+{
+  QFont font( wordListDefaultFont );
+  int ps = font.pointSize();
+
+  if ( cfg.preferences.wordsZoomLevel != 0 )
+  {
+    ps += cfg.preferences.wordsZoomLevel;
+    if ( ps < 1 )
+      ps = 1;
+    font.setPointSize( ps );
+  }
+
+  if ( ui.translateBox->wordList()->font().pointSize() != ps )
+    ui.translateBox->wordList()->setFont( font );
+
+  font = translateLineDefaultFont;
+  ps = font.pointSize();
+
+  if ( cfg.preferences.wordsZoomLevel != 0 )
+  {
+    ps += cfg.preferences.wordsZoomLevel;
+    if ( ps < 1 )
+      ps = 1;
+    font.setPointSize( ps );
+  }
+
+  if ( ui.translateBox->translateLine()->font().pointSize() != ps )
+    ui.translateBox->translateLine()->setFont( font );
+
+  font = groupListDefaultFont;
+  ps = font.pointSize();
+
+  if ( cfg.preferences.wordsZoomLevel != 0 )
+  {
+    ps += cfg.preferences.wordsZoomLevel;
+    if ( ps < 1 )
+      ps = 1;
+    font.setPointSize( ps );
+  }
+
+  if ( ui.groupList->font().pointSize() != ps )
+  {
+    disconnect( ui.groupList, SIGNAL( currentIndexChanged( QString const & ) ),
+                this, SLOT( currentGroupChanged( QString const & ) ) );
+    int n = ui.groupList->currentIndex();
+    ui.groupList->clear();
+    ui.groupList->setFont( font );
+    ui.groupList->fill( groups );
+    ui.groupList->setCurrentIndex( n );
+    connect( ui.groupList, SIGNAL( currentIndexChanged( QString const & ) ),
+             this, SLOT( currentGroupChanged( QString const & ) ) );
+  }
+
+  ui.outerFrame->layout()->activate();
+}
+
+Qt::WindowFlags ScanPopup::unpinnedWindowFlags() const
+{
+#ifdef ENABLE_SPWF_CUSTOMIZATION
+  const Config::ScanPopupWindowFlags spwf = cfg.preferences.scanPopupUnpinnedWindowFlags;
+  Qt::WindowFlags result;
+  if( spwf == Config::SPWF_Popup )
+    result = Qt::Popup;
+  else
+  if( spwf == Config::SPWF_Tool )
+    result = Qt::Tool | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint;
+  else
+    return defaultUnpinnedWindowFlags; // Ignore BypassWMHint option.
+
+  if( cfg.preferences.scanPopupUnpinnedBypassWMHint )
+    result |= Qt::X11BypassWindowManagerHint;
+  return result;
+#else
+  return defaultUnpinnedWindowFlags;
+#endif
 }
 
 void ScanPopup::translateWordFromClipboard()
@@ -339,7 +492,7 @@ void ScanPopup::translateWordFromClipboard(QClipboard::Mode m)
 
 void ScanPopup::translateWord( QString const & word )
 {
-  QString str = pendingInputWord = gd::toQString( Folding::trimWhitespaceOrPunct( gd::toWString( word ) ) ).simplified();
+  QString str = pendingInputWord = cfg.preferences.sanitizeInputPhrase( word );
 
   if ( !str.size() )
     return; // Nothing there
@@ -348,9 +501,13 @@ void ScanPopup::translateWord( QString const & word )
   altModePollingTimer.stop();
   altModeExpirationTimer.stop();
 
+#ifdef HAVE_X11
+  emit hideScanFlag();
+#endif
+
   inputWord = str;
   engagePopup( false,
-#ifdef Q_WS_WIN
+#ifdef Q_OS_WIN
       true // We only focus popup under Windows when activated via Ctrl+C+C
            // -- on Linux it already has an implicit focus
 #else
@@ -359,12 +516,33 @@ void ScanPopup::translateWord( QString const & word )
       );
 }
 
+#ifdef HAVE_X11
+void ScanPopup::delayShow()
+{
+  QString subtype = "plain";
+  handleInputWord( QApplication::clipboard()->text( subtype, QClipboard::Selection ) );
+}
+#endif
+
 void ScanPopup::clipboardChanged( QClipboard::Mode m )
 {
   if ( !isScanningEnabled )
     return;
-  
+#ifdef HAVE_X11
+  if( cfg.preferences.ignoreOwnClipboardChanges && ownsClipboardMode( m ) )
+    return;
+#endif
+
   GD_DPRINTF( "clipboard changed\n" );
+
+#ifdef HAVE_X11
+  if( m == QClipboard::Selection )
+  {
+    // Use delay show to prevent multiple popups while selection in progress
+    delayTimer.start();
+    return;
+  }
+#endif
 
   QString subtype = "plain";
 
@@ -378,7 +556,7 @@ void ScanPopup::mouseHovered( QString const & str, bool forcePopup )
 
 void ScanPopup::handleInputWord( QString const & str, bool forcePopup )
 {
-  QString sanitizedStr = gd::toQString( Folding::trimWhitespaceOrPunct( gd::toWString( str ) ) );
+  QString sanitizedStr = cfg.preferences.sanitizeInputPhrase( str );
 
   if ( isVisible() && sanitizedStr == inputWord )
   {
@@ -401,6 +579,14 @@ void ScanPopup::handleInputWord( QString const & str, bool forcePopup )
     return;
   }
 
+#ifdef HAVE_X11
+  if ( cfg.preferences.showScanFlag ) {
+    inputWord = pendingInputWord;
+    emit showScanFlag( forcePopup );
+    return;
+  }
+#endif
+
   // Check key modifiers
 
   if ( cfg.preferences.enableScanPopupModifiers && !checkModifiersPressed( cfg.preferences.scanPopupModifiers ) )
@@ -417,6 +603,13 @@ void ScanPopup::handleInputWord( QString const & str, bool forcePopup )
   inputWord = pendingInputWord;
   engagePopup( forcePopup );
 }
+
+#ifdef HAVE_X11
+void ScanPopup::showEngagePopup()
+{
+  engagePopup(false);
+}
+#endif
 
 void ScanPopup::engagePopup( bool forcePopup, bool giveFocus )
 {
@@ -472,6 +665,14 @@ void ScanPopup::engagePopup( bool forcePopup, bool giveFocus )
 
     show();
 
+#ifdef ENABLE_SPWF_CUSTOMIZATION
+    // Ensure that the window always has focus on X11 with Qt::Tool flag.
+    // This also often prevents the window from disappearing prematurely with Qt::Popup flag,
+    // especially when combined with Qt::X11BypassWindowManagerHint flag.
+    if ( !ui.pinButton->isChecked() )
+      giveFocus = true;
+#endif
+
     if ( giveFocus )
     {
       activateWindow();
@@ -496,6 +697,15 @@ void ScanPopup::engagePopup( bool forcePopup, bool giveFocus )
     activateWindow();
     raise();
   }
+#ifdef ENABLE_SPWF_CUSTOMIZATION
+  else
+  if ( ( windowFlags() & Qt::Tool ) == Qt::Tool )
+  {
+    // Ensure that the window with Qt::Tool flag always has focus on X11.
+    activateWindow();
+    raise();
+  }
+#endif
 
   if ( ui.pinButton->isChecked() )
        setWindowTitle( tr( "%1 - %2" ).arg( elideInputWord(), "GoldenDict" ) );
@@ -589,7 +799,8 @@ void ScanPopup::showTranslationFor( QString const & inputWord )
 {
   ui.pronounceButton->hide();
 
-  definition->showDefinition( inputWord, ui.groupList->getCurrentGroup() );
+  unsigned groupId = ui.groupList->getCurrentGroup();
+  definition->showDefinition( inputWord, groupId );
   definition->focus();
 
   // Add to history
@@ -645,15 +856,29 @@ void ScanPopup::typingEvent( QString const & t )
 
 bool ScanPopup::eventFilter( QObject * watched, QEvent * event )
 {
-  if ( event->type() == QEvent::FocusIn && watched == ui.translateBox->translateLine() )
+  if ( watched == ui.translateBox->translateLine() )
   {
-    QFocusEvent * focusEvent = static_cast< QFocusEvent * >( event );
+    if ( event->type() == QEvent::FocusIn )
+    {
+      QFocusEvent * focusEvent = static_cast< QFocusEvent * >( event );
 
-    // select all on mouse click
-    if ( focusEvent->reason() == Qt::MouseFocusReason ) {
-      QTimer::singleShot(0, this, SLOT(focusTranslateLine()));
+      // select all on mouse click
+      if ( focusEvent->reason() == Qt::MouseFocusReason ) {
+        QTimer::singleShot(0, this, SLOT(focusTranslateLine()));
+      }
+      return false;
     }
-    return false;
+
+    if ( event->type() == QEvent::Resize )
+    {
+      // The UI looks ugly when group combobox is higher than translate line.
+      // Make the height of the combobox the same as the line edit's height.
+      // The fonts of these UI items should be kept in sync by applyWordsZoomLevel()
+      // so that text in the combobox is not clipped.
+      const QResizeEvent * const resizeEvent = static_cast< const QResizeEvent * >( event );
+      ui.groupList->setFixedHeight( resizeEvent->size().height() );
+      return false;
+    }
   }
 
   if ( mouseIntercepted )
@@ -746,7 +971,7 @@ void ScanPopup::mouseMoveEvent( QMouseEvent * event )
 
     move( pos() + delta );
   }
- 
+
   QMainWindow::mouseMoveEvent( event );
 }
 
@@ -793,7 +1018,7 @@ void ScanPopup::requestWindowFocus()
   // One of the rare, actually working workarounds for requesting a user keyboard focus on X11,
   // works for Qt::Popup windows, exactly like our Scan Popup (in unpinned state).
   // Modern window managers actively resist to automatically focus pop-up windows.
-#ifdef Q_WS_X11
+#if defined HAVE_X11 && QT_VERSION < QT_VERSION_CHECK( 5, 0, 0 )
   if ( !ui.pinButton->isChecked() )
   {
     QMenu m( this );
@@ -809,7 +1034,7 @@ void ScanPopup::showEvent( QShowEvent * ev )
   QMainWindow::showEvent( ev );
 
   QTimer::singleShot(100, this, SLOT( requestWindowFocus() ) );
-  
+
   if ( groups.size() <= 1 ) // Only the default group? Hide then.
     ui.groupList->hide();
 
@@ -846,15 +1071,21 @@ void ScanPopup::pinButtonClicked( bool checked )
   {
     uninterceptMouse();
 
-    setWindowFlags( Qt::Dialog );
+    ui.onTopButton->setVisible( true );
+    Qt::WindowFlags flags = pinnedWindowFlags;
+    if( ui.onTopButton->isChecked() )
+      flags |= Qt::WindowStaysOnTopHint;
+    setWindowFlags( flags );
+
     setWindowTitle( tr( "%1 - %2" ).arg( elideInputWord(), "GoldenDict" ) );
     dictionaryBar.setMovable( true );
     hideTimer.stop();
   }
   else
   {
+    ui.onTopButton->setVisible( false );
     dictionaryBar.setMovable( false );
-    setWindowFlags( popupWindowFlags );
+    setWindowFlags( unpinnedWindowFlags() );
 
     mouseEnteredOnce = true;
   }
@@ -1020,6 +1251,15 @@ void ScanPopup::on_sendWordButton_clicked()
   emit sendWordToMainWindow( definition->getTitle() );
 }
 
+void ScanPopup::on_sendWordToFavoritesButton_clicked()
+{
+  if ( !isVisible() )
+    return;
+  emit sendWordToFavorites( definition->getTitle(), cfg.lastPopupGroupId );
+
+  ui.sendWordToFavoritesButton->setIcon( blueStarIcon );
+}
+
 void ScanPopup::switchExpandOptionalPartsMode()
 {
   if( isVisible() )
@@ -1048,4 +1288,43 @@ void ScanPopup::setDictionaryIconSize()
                QApplication::style()->pixelMetric( QStyle::PM_SmallIconSize ) :
                21;
   dictionaryBar.setDictionaryIconSize( extent );
+}
+
+void ScanPopup::setGroupByName( QString const & name )
+{
+  int i;
+  for( i = 0; i < ui.groupList->count(); i++ )
+  {
+    if( ui.groupList->itemText( i ) == name )
+    {
+      ui.groupList->setCurrentIndex( i );
+      break;
+    }
+  }
+  if( i >= ui.groupList->count() )
+    gdWarning( "Group \"%s\" for popup window is not found\n", name.toUtf8().data() );
+}
+
+void ScanPopup::alwaysOnTopClicked( bool checked )
+{
+  bool wasVisible = isVisible();
+  if( ui.pinButton->isChecked() )
+  {
+    Qt::WindowFlags flags = this->windowFlags();
+    if( checked )
+      setWindowFlags(flags | Qt::WindowStaysOnTopHint );
+    else
+      setWindowFlags(flags ^ Qt::WindowStaysOnTopHint );
+    if( wasVisible )
+      show();
+  }
+}
+
+void ScanPopup::titleChanged( ArticleView *, QString const & title )
+{
+  unsigned groupId = ui.groupList->getCurrentGroup();
+
+  // Set icon for "Add to Favorites" button
+  ui.sendWordToFavoritesButton->setIcon( isWordPresentedInFavorites( title, groupId ) ?
+                                         blueStarIcon : starIcon );
 }

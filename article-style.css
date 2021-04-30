@@ -39,7 +39,7 @@ pre
   /*background: #ffffdd;*/
 }
 
-/* The 'From ' string which preceeds dictionary name in the heading */
+/* The 'From ' string which precedes dictionary name in the heading */
 .gdfromprefix
 {
 }
@@ -50,7 +50,7 @@ pre
 {
   display: block;
   padding-top: 1px;
-  margin-top: -9px;
+  margin-top: -8px;
   margin-bottom: 8px;
   background: #fefdeb;
 /*fix for invalid blg*/
@@ -113,6 +113,12 @@ pre
 /* StarDict type 'h' -- Html content. We don't normally do anything here. */
 div.sdct_h
 {
+}
+
+.sdict_h_wav img
+{
+  /* Ugly hack since "vertical-align: middle;" looks _terrible_ in Qt4's webkit: */
+  vertical-align: -30%;
 }
 
 /* StarDict type 'm' -- Pure meaning. Presented as <pre> */
@@ -249,6 +255,25 @@ div.xdxf
     color: #808080;
 }
 
+.xdxf_ex_source:before
+{
+    content:"["
+}
+.xdxf_ex_source:after
+{
+    content:"]"
+}
+
+.xdxf_ex_tran:before
+{
+    content:"— "
+}
+
+.xdxf_ex_tran
+{
+    font-style: italic;
+}
+
 /* Direct translation */
 .xdxf_dtrn
 {
@@ -343,6 +368,11 @@ div.xdxf
   text-decoration: underline;
 }
 
+.dsl_article
+{
+  display:inline;
+}
+
 .dsl_article font[color=c_default_color]
 {
   color: green;
@@ -398,7 +428,7 @@ div.xdxf
   padding-left: 81px;
 }
 
-.dsl_p, .dsl_p :not(a) /* DSL Feature: Enforce the style even if the childen tags say otherwise, except links */
+.dsl_p, .dsl_p :not(a) /* DSL Feature: Enforce the style even if the children tags say otherwise, except links */
 {
   color: green !important; /* DSL label color must have highest priority */
   font-style: italic;
@@ -442,7 +472,7 @@ div.xdxf
 .dsl_opt,
 .dsl_opt .dsl_ex,
 .dsl_opt .dsl_ex :not(a),
-.dsl_opt .dsl_ex font[color] /* DSL Feature: Enforce the optional zone color even if the childen tags say otherwise */
+.dsl_opt .dsl_ex font[color] /* DSL Feature: Enforce the optional zone color even if the children tags say otherwise */
 {
   color: gray;
 }
@@ -586,6 +616,11 @@ div.xdxf
   width: 13px;
   height: 13px;
   vertical-align: -15%;
+}
+
+.epwing_article
+{
+  display:inline;
 }
 
 /************* Websites *****************/
@@ -2884,3 +2919,18 @@ in bg url to hide it from iemac */
     vertical-align: baseline !important;
 }
 
+/************* GLS dictionaries **************/
+
+.glsdict_headwords
+{
+  font-weight: bold;
+  margin-top: 15px;
+  margin-bottom: 10px;
+  font-size: 116%;
+}
+
+.gls_wav img
+{
+  /* Ugly hack since "vertical-align: middle;" looks _terrible_ in Qt4's webkit: */
+  vertical-align: -30%;
+}

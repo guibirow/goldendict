@@ -1,13 +1,15 @@
 /* This file is (c) 2008-2012 Konstantin Isakov <ikm@goldendict.org>
  * Part of GoldenDict. Licensed under GPLv3 or later, see the LICENSE file */
 
-#include <QUrl>
 #include "programs.hh"
 #include "audiolink.hh"
 #include "htmlescape.hh"
 #include "utf8.hh"
 #include "wstring_qt.hh"
 #include "parsecmdline.hh"
+#include "iconv.hh"
+#include "qt4x5.hh"
+
 #include <QDir>
 #include <QFileInfo>
 
@@ -42,12 +44,12 @@ public:
 
   virtual sptr< WordSearchRequest > prefixMatch( wstring const & word,
                                                  unsigned long maxResults )
-    throw( std::exception );
+    THROW_SPEC( std::exception );
 
   virtual sptr< DataRequest > getArticle( wstring const &,
                                           vector< wstring > const & alts,
-                                          wstring const & )
-    throw( std::exception );
+                                          wstring const &, bool )
+    THROW_SPEC( std::exception );
 
 protected:
 
@@ -56,7 +58,7 @@ protected:
 
 sptr< WordSearchRequest > ProgramsDictionary::prefixMatch( wstring const & word,
                                                            unsigned long /*maxResults*/ )
-  throw( std::exception )
+  THROW_SPEC( std::exception )
 {
   if ( prg.type == Config::Program::PrefixMatch )
     return new ProgramWordSearchRequest( gd::toQString( word ), prg );
@@ -71,8 +73,8 @@ sptr< WordSearchRequest > ProgramsDictionary::prefixMatch( wstring const & word,
 }
 
 sptr< Dictionary::DataRequest > ProgramsDictionary::getArticle(
-  wstring const & word, vector< wstring > const &, wstring const & )
-  throw( std::exception )
+  wstring const & word, vector< wstring > const &, wstring const &, bool )
+  THROW_SPEC( std::exception )
 {
   switch( prg.type )
   {
@@ -88,7 +90,7 @@ sptr< Dictionary::DataRequest > ProgramsDictionary::getArticle(
       QUrl url;
       url.setScheme( "gdprg" );
       url.setHost( QString::fromUtf8( getId().c_str() ) );
-      url.setPath( QString::fromUtf8( wordUtf8.c_str() ) );
+      url.setPath( Qt4x5::Url::ensureLeadingSlash( QString::fromUtf8( wordUtf8.c_str() ) ) );
 
       string ref = string( "\"" ) + url.toEncoded().data() + "\"";
 
@@ -222,6 +224,7 @@ ProgramDataRequest::ProgramDataRequest( QString const & word,
 
 void ProgramDataRequest::instanceFinished( QByteArray output, QString error )
 {
+  QString prog_output;
   if ( !isFinished() )
   {
     if ( !output.isEmpty() )
@@ -232,12 +235,80 @@ void ProgramDataRequest::instanceFinished( QByteArray output, QString error )
       {
       case Config::Program::PlainText:
         result += "plaintext'>";
-        result += Html::preformat( QString::fromLocal8Bit( output ).toUtf8().data() );
+        try
+        {
+          // Check BOM if present
+          unsigned char * uchars = reinterpret_cast< unsigned char * >( output.data() );
+          if( output.length() >= 2 && uchars[ 0 ] == 0xFF && uchars[ 1 ] == 0xFE )
+          {
+            int size = output.length() - 2;
+            if( size & 1 )
+              size -= 1;
+            string res= Iconv::toUtf8( "UTF-16LE", output.data() + 2, size );
+            prog_output = QString::fromUtf8( res.c_str(), res.size() );
+          }
+          else
+          if( output.length() >= 2 && uchars[ 0 ] == 0xFE && uchars[ 1 ] == 0xFF )
+          {
+            int size = output.length() - 2;
+            if( size & 1 )
+              size -= 1;
+            string res = Iconv::toUtf8( "UTF-16BE", output.data() + 2, size );
+            prog_output = QString::fromUtf8( res.c_str(), res.size() );
+          }
+          else
+          if( output.length() >= 3 && uchars[ 0 ] == 0xEF && uchars[ 1 ] == 0xBB && uchars[ 2 ] == 0xBF )
+          {
+            prog_output = QString::fromUtf8( output.data() + 3, output.length() - 3 );
+          }
+          else
+          {
+            // No BOM, assume local 8-bit encoding
+            prog_output = QString::fromLocal8Bit( output );
+          }
+        }
+        catch( std::exception & e )
+        {
+          error = e.what();
+        }
+        result += Html::preformat( prog_output.toUtf8().data() );
         break;
       default:
         result += "html'>";
-        // We assume html data is in utf8 encoding already.
-        result += output.data();
+        try
+        {
+          // Check BOM if present
+          unsigned char * uchars = reinterpret_cast< unsigned char * >( output.data() );
+          if( output.length() >= 2 && uchars[ 0 ] == 0xFF && uchars[ 1 ] == 0xFE )
+          {
+            int size = output.length() - 2;
+            if( size & 1 )
+              size -= 1;
+            result += Iconv::toUtf8( "UTF-16LE", output.data() + 2, size );
+          }
+          else
+          if( output.length() >= 2 && uchars[ 0 ] == 0xFE && uchars[ 1 ] == 0xFF )
+          {
+            int size = output.length() - 2;
+            if( size & 1 )
+              size -= 1;
+            result += Iconv::toUtf8( "UTF-16BE", output.data() + 2, size );
+          }
+          else
+          if( output.length() >= 3 && uchars[ 0 ] == 0xEF && uchars[ 1 ] == 0xBB && uchars[ 2 ] == 0xBF )
+          {
+            result += output.data() + 3;
+          }
+          else
+          {
+            // We assume html data is in utf8 encoding already.
+            result += output.data();
+          }
+        }
+        catch( std::exception & e )
+        {
+          error = e.what();
+        }
       }
 
       result += "</div>";
@@ -301,7 +372,7 @@ void ProgramWordSearchRequest::cancel()
 
 vector< sptr< Dictionary::Class > > makeDictionaries(
   Config::Programs const & programs )
-  throw( std::exception )
+  THROW_SPEC( std::exception )
 {
   vector< sptr< Dictionary::Class > > result;
 

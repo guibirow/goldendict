@@ -5,7 +5,6 @@
 #include "wstring_qt.hh"
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
-#include <QUrl>
 #include <QtXml>
 #include <list>
 #include "audiolink.hh"
@@ -15,6 +14,7 @@
 #include "langcoder.hh"
 #include "utf8.hh"
 #include "gddebug.hh"
+#include "qt4x5.hh"
 
 namespace Forvo {
 
@@ -55,7 +55,7 @@ public:
   { return 0; }
 
   virtual sptr< WordSearchRequest > prefixMatch( wstring const & /*word*/,
-                                                 unsigned long /*maxResults*/ ) throw( std::exception )
+                                                 unsigned long /*maxResults*/ ) THROW_SPEC( std::exception )
   {
     sptr< WordSearchRequestInstant > sr = new WordSearchRequestInstant;
 
@@ -65,8 +65,8 @@ public:
   }
 
   virtual sptr< DataRequest > getArticle( wstring const &, vector< wstring > const & alts,
-                                          wstring const & )
-    throw( std::exception );
+                                          wstring const &, bool )
+    THROW_SPEC( std::exception );
 
 protected:
 
@@ -76,8 +76,8 @@ protected:
 
 sptr< DataRequest > ForvoDictionary::getArticle( wstring const & word,
                                                  vector< wstring > const & alts,
-                                                 wstring const & )
-  throw( std::exception )
+                                                 wstring const &, bool )
+  THROW_SPEC( std::exception )
 {
   if ( word.size() > 80 )
   {
@@ -168,8 +168,13 @@ void ForvoArticleRequest::addQuery( QNetworkAccessManager & mgr,
     key = apiKey;
 
   QUrl reqUrl = QUrl::fromEncoded(
-      QString( "http://apifree.forvo.com/key/" + key + "/format/xml/action/word-pronunciations/word/" +
-      QString::fromLatin1( QUrl::toPercentEncoding( gd::toQString( str ) ) ) + "/language/" + languageCode
+      QString( "https://apifree.forvo.com"
+               "/key/" + key +
+               "/action/word-pronunciations"
+               "/format/xml"
+               "/word/" + QLatin1String( QUrl::toPercentEncoding( gd::toQString( str ) ) ) +
+               "/language/" + languageCode +
+               "/order/rate-desc"
        ).toUtf8() );
 
 //  DPRINTF( "req: %s\n", reqUrl.toEncoded().data() );
@@ -244,7 +249,7 @@ void ForvoArticleRequest::requestFinished( QNetworkReply * r )
 
             articleBody += "<table class=\"forvo_play\">";
 
-            for( unsigned x = 0; x < nl.length(); ++x )
+            for( Qt4x5::Dom::size_type x = 0; x < nl.length(); ++x )
             {
               QDomElement item = nl.item( x ).toElement();
 
@@ -367,7 +372,7 @@ vector< sptr< Dictionary::Class > > makeDictionaries(
                                       Dictionary::Initializing &,
                                       Config::Forvo const & forvo,
                                       QNetworkAccessManager & mgr )
-  throw( std::exception )
+  THROW_SPEC( std::exception )
 {
   vector< sptr< Dictionary::Class > > result;
 

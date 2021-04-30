@@ -1,6 +1,6 @@
 TEMPLATE = app
 TARGET = goldendict
-VERSION = 1.5.0+git
+VERSION = 1.5.0-RC2+git
 
 # Generate version file. We do this here and in a build rule described later.
 # The build rule is required since qmake isn't run each time the project is
@@ -16,15 +16,37 @@ isEmpty( hasGit ) {
 
 # DEPENDPATH += . generators
 INCLUDEPATH += .
-QT += webkit
-QT += xml
-QT += network
-QT += svg
+
+QT += core \
+      gui \
+      xml \
+      network \
+      svg
+
+greaterThan(QT_MAJOR_VERSION, 4) {
+    QT += widgets \
+          webkitwidgets \
+          printsupport \
+          help
+
+    # QMediaPlayer is not available in Qt4.
+    !CONFIG( no_qtmultimedia_player ) {
+      QT += multimedia
+      DEFINES += MAKE_QTMULTIMEDIA_PLAYER
+    }
+} else {
+    QT += webkit
+    CONFIG += help
+}
+
+!CONFIG( no_ffmpeg_player ) {
+  DEFINES += MAKE_FFMPEG_PLAYER
+}
+
 QT += sql
 CONFIG += exceptions \
     rtti \
-    stl \
-    help
+    stl
 OBJECTS_DIR = build
 UI_DIR = build
 MOC_DIR = build
@@ -34,8 +56,6 @@ LIBS += \
         -lbz2 \
         -llzo2
 
-!isEmpty(DISABLE_INTERNAL_PLAYER): DEFINES += DISABLE_INTERNAL_PLAYER
-
 win32 {
     TARGET = GoldenDict
 
@@ -44,17 +64,17 @@ win32 {
         DEFINES += __WIN32 _CRT_SECURE_NO_WARNINGS
         contains(QMAKE_TARGET.arch, x86_64) {
             DEFINES += NOMINMAX __WIN64
-            LIBS += -L$${PWD}/winlibs/lib/msvc/x64
-        } else {
-            LIBS += -L$${PWD}/winlibs/lib/msvc
         }
+        LIBS += -L$${PWD}/winlibs/lib/msvc
         QMAKE_CXXFLAGS += /wd4290 # silence the warning C4290: C++ exception specification ignored
-        QMAKE_LFLAGS_RELEASE += /LTCG /OPT:REF /OPT:ICF
+        QMAKE_LFLAGS_RELEASE += /OPT:REF /OPT:ICF
+        DEFINES += GD_NO_MANIFEST
         # QMAKE_CXXFLAGS_RELEASE += /GL # slows down the linking significantly
-        LIBS += -lshell32 -luser32 -lsapi -lole32 -lhunspell
+        LIBS += -lshell32 -luser32 -lsapi -lole32
+        Debug: LIBS+= -lhunspelld
+        Release: LIBS+= -lhunspell
         HUNSPELL_LIB = hunspell
     } else {
-        LIBS += -lhunspell-1.3.2
         CONFIG(gcc48) {
             x64 {
                 LIBS += -L$${PWD}/winlibs/lib64-48
@@ -67,6 +87,13 @@ win32 {
             LIBS += -L$${PWD}/winlibs/lib
         }
         !x64:QMAKE_LFLAGS += -Wl,--large-address-aware
+
+        isEmpty(HUNSPELL_LIB) {
+          LIBS += -lhunspell-1.6.1
+        } else {
+          LIBS += -l$$HUNSPELL_LIB
+        }
+        QMAKE_CXXFLAGS += -Wextra -Wempty-body
     }
 
     LIBS += -liconv \
@@ -79,13 +106,15 @@ win32 {
     LIBS += -lvorbisfile \
         -lvorbis \
         -logg
-
-    isEmpty(DISABLE_INTERNAL_PLAYER) {
+    !CONFIG( no_ffmpeg_player ) {
         LIBS += -lao \
+            -lswresample-gd \
             -lavutil-gd \
             -lavformat-gd \
             -lavcodec-gd
     }
+
+
     RC_FILE = goldendict.rc
     INCLUDEPATH += winlibs/include
 
@@ -97,23 +126,39 @@ win32 {
     gcc48:QMAKE_CXXFLAGS += -Wno-unused-local-typedefs
 
     CONFIG += zim_support
+
+    !CONFIG( no_chinese_conversion_support ) {
+        CONFIG += chinese_conversion_support
+    }
+
+    greaterThan(QT_MAJOR_VERSION, 4) {
+      LIBS += -luxtheme
+    }
 }
 
 unix:!mac {
+  DEFINES += HAVE_X11
   # This is to keep symbols for backtraces
   QMAKE_CXXFLAGS += -rdynamic
   QMAKE_LFLAGS += -rdynamic
 
+    greaterThan(QT_MAJOR_VERSION, 4) {
+      greaterThan(QT_MINOR_VERSION, 0) {
+        QT += x11extras
+      }
+    }
+
     CONFIG += link_pkgconfig
     PKGCONFIG += vorbisfile \
-    	vorbis \
+        vorbis \
         ogg \
         hunspell
-    isEmpty(DISABLE_INTERNAL_PLAYER) {
+    !CONFIG( no_ffmpeg_player ) {
         PKGCONFIG += ao \
             libavutil \
             libavformat \
-            libavcodec
+            libavcodec \
+            libswresample \
     }
     arm {
         LIBS += -liconv
@@ -141,9 +186,15 @@ unix:!mac {
     desktops.path = $$PREFIX/share/applications
     desktops.files = redist/*.desktop
     INSTALLS += desktops
+    metainfo.path = $$PREFIX/share/metainfo
+    metainfo.files = redist/*.metainfo.xml
+    INSTALLS += metainfo
     helps.path = $$PREFIX/share/goldendict/help/
     helps.files = help/*.qch
     INSTALLS += helps
+}
+freebsd {
+    LIBS += -liconv -lexecinfo
 }
 mac {
     TARGET = GoldenDict
@@ -157,10 +208,11 @@ mac {
         -lvorbisfile \
         -lvorbis \
         -logg \
-        -lhunspell-1.2 \
+        -lhunspell-1.6.1 \
         -llzo2
-    isEmpty(DISABLE_INTERNAL_PLAYER) {
+    !CONFIG( no_ffmpeg_player ) {
         LIBS += -lao \
+            -lswresample-gd \
             -lavutil-gd \
             -lavformat-gd \
             -lavcodec-gd
@@ -181,6 +233,18 @@ mac {
                       cp -R $${PWD}/help/*.qch GoldenDict.app/Contents/MacOS/help/
 
     CONFIG += zim_support
+    !CONFIG( no_chinese_conversion_support ) {
+        CONFIG += chinese_conversion_support
+        CONFIG( x86 ) {
+            QMAKE_POST_LINK += & mkdir -p GoldenDict.app/Contents/MacOS/opencc & \
+                                 cp -R $${PWD}/opencc/*.json GoldenDict.app/Contents/MacOS/opencc/ & \
+                                 cp -R $${PWD}/opencc/*.ocd GoldenDict.app/Contents/MacOS/opencc/
+        } else {
+            QMAKE_POST_LINK += & mkdir -p GoldenDict.app/Contents/MacOS/opencc & \
+                                 cp -R $${PWD}/opencc/x64/*.json GoldenDict.app/Contents/MacOS/opencc/ & \
+                                 cp -R $${PWD}/opencc/x64/*.ocd GoldenDict.app/Contents/MacOS/opencc/
+        }
+    }
 }
 DEFINES += PROGRAM_VERSION=\\\"$$VERSION\\\"
 
@@ -218,6 +282,11 @@ HEADERS += folding.hh \
     article_maker.hh \
     scanpopup.hh \
     articleview.hh \
+    audioplayerinterface.hh \
+    audioplayerfactory.hh \
+    ffmpegaudioplayer.hh \
+    multimediaaudioplayer.hh \
+    externalaudioplayer.hh \
     externalviewer.hh \
     wordfinder.hh \
     groupcombobox.hh \
@@ -287,6 +356,7 @@ HEADERS += folding.hh \
     delegate.hh \
     zim.hh \
     gddebug.hh \
+    qt4x5.hh \
     gestures.hh \
     tiff.hh \
     dictheadwords.hh \
@@ -294,14 +364,19 @@ HEADERS += folding.hh \
     ftshelpers.hh \
     dictserver.hh \
     helpwindow.hh \
-    slob.hh
+    slob.hh \
+    ripemd.hh \
+    gls.hh \
+    splitfile.hh \
+    favoritespanewidget.hh \
+    cpp_features.hh \
+    treeview.hh
 
 FORMS += groups.ui \
     dictgroupwidget.ui \
     mainwindow.ui \
     sources.ui \
     initializing.ui \
-    groupselectorwidget.ui \
     scanpopup.ui \
     articleview.ui \
     preferences.ui \
@@ -343,6 +418,9 @@ SOURCES += folding.cc \
     article_maker.cc \
     scanpopup.cc \
     articleview.cc \
+    audioplayerfactory.cc \
+    multimediaaudioplayer.cc \
+    externalaudioplayer.cc \
     externalviewer.cc \
     wordfinder.cc \
     groupcombobox.cc \
@@ -417,10 +495,15 @@ SOURCES += folding.cc \
     ftshelpers.cc \
     dictserver.cc \
     helpwindow.cc \
-    slob.cc
+    slob.cc \
+    ripemd.cc \
+    gls.cc \
+    splitfile.cc \
+    favoritespanewidget.cc \
+    treeview.cc
 
 win32 {
-	FORMS   += texttospeechsource.ui
+    FORMS   += texttospeechsource.ui
     SOURCES += mouseover_win32/ThTypes.c \
                wordbyauto.cc \
                guids.c \
@@ -436,7 +519,8 @@ win32 {
                sapi.hh \
                sphelper.hh \
                speechclient.hh \
-               speechhlp.hh
+               speechhlp.hh \
+               hotkeys.h
 }
 
 mac {
@@ -447,9 +531,20 @@ mac {
     SOURCES += texttospeechsource.cc
 }
 
+unix:!mac {
+    HEADERS += scanflag.hh
+    FORMS   += scanflag.ui
+    SOURCES += scanflag.cc
+}
+
+greaterThan(QT_MAJOR_VERSION, 4) {
+    HEADERS += wildcard.hh
+    SOURCES += wildcard.cc
+}
+
 CONFIG( zim_support ) {
   DEFINES += MAKE_ZIM_SUPPORT
-  LIBS += -llzma
+  LIBS += -llzma -lzstd
 }
 
 !CONFIG( no_extra_tiff_handler ) {
@@ -469,6 +564,29 @@ CONFIG( no_epwing_support ) {
              epwing_book.cc \
              epwing_charmap.cc
   LIBS += -leb
+}
+
+CONFIG( chinese_conversion_support ) {
+  DEFINES += MAKE_CHINESE_CONVERSION_SUPPORT
+  FORMS   += chineseconversion.ui
+  HEADERS += chinese.hh \
+             chineseconversion.hh
+  SOURCES += chinese.cc \
+             chineseconversion.cc
+  win32-msvc* {
+    Debug:   LIBS += -lopenccd
+    Release: LIBS += -lopencc
+  } else {
+    mac {
+      LIBS += -lopencc.2
+    } else {
+      LIBS += -lopencc
+    }
+  }
+}
+
+CONFIG( old_hunspell ) {
+  DEFINES += OLD_HUNSPELL_INTERFACE
 }
 
 RESOURCES += resources.qrc \
@@ -506,19 +624,25 @@ TRANSLATIONS += locale/ru_RU.ts \
     locale/sv_SE.ts \
     locale/tk_TM.ts \
     locale/fa_IR.ts \
-    locale/mk_MK.ts
+    locale/mk_MK.ts \
+    locale/eo_EO.ts \
+    locale/fi_FI.ts \
+    locale/jb_JB.ts \
+    locale/hi_IN.ts \
+    locale/ie_001.ts
 
 # Build version file
 !isEmpty( hasGit ) {
   QMAKE_EXTRA_TARGETS += revtarget
   PRE_TARGETDEPS      += $$PWD/version.txt
   revtarget.target     = $$PWD/version.txt
-!win32 {
-  revtarget.commands   = cd $$PWD; git describe --tags --always --dirty > $$revtarget.target
-}
-win32 {
-  revtarget.commands   = git --git-dir=\"$$PWD/.git\" describe --tags --always --dirty > $$revtarget.target
-}
+
+  !win32 {
+    revtarget.commands   = cd $$PWD; git describe --tags --always --dirty > $$revtarget.target
+  } else {
+    revtarget.commands   = git --git-dir=\"$$PWD/.git\" describe --tags --always --dirty > $$revtarget.target
+  }
+
   ALL_SOURCES = $$SOURCES $$HEADERS $$FORMS
   for(src, ALL_SOURCES) {
     QUALIFIED_SOURCES += $${PWD}/$${src}

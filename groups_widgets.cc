@@ -17,6 +17,8 @@
 #include <QMap>
 #include <QVector>
 #include <QFileInfo>
+#include <QFileDialog>
+#include <QMessageBox>
 
 using std::vector;
 
@@ -29,7 +31,7 @@ DictGroupWidget::DictGroupWidget( QWidget * parent,
   groupId( group.id )
 {
   ui.setupUi( this );
-  ui.dictionaries->populate( Instances::Group( group, dicts ).dictionaries, dicts );
+  ui.dictionaries->populate( Instances::Group( group, dicts, Config::Group() ).dictionaries, dicts );
 
   // Populate icons' list
 
@@ -60,6 +62,8 @@ DictGroupWidget::DictGroupWidget( QWidget * parent,
     ui.groupIcon->setCurrentIndex( 1 );
 
   ui.shortcut->setHotKey( Config::HotKey( group.shortcut ) );
+
+  ui.favoritesFolder->setText( group.favoritesFolder );
 
   connect( ui.groupIcon, SIGNAL(activated(int)),this,SLOT(groupIconActivated(int)),
            Qt::QueuedConnection );
@@ -127,6 +131,8 @@ Config::Group DictGroupWidget::makeGroup() const
 
   g.shortcut = ui.shortcut->getHotKey().toKeySequence();
 
+  g.favoritesFolder = ui.favoritesFolder->text().replace( '\\', '/' );
+
   return g.makeConfigGroup();
 }
 
@@ -164,14 +170,16 @@ void DictListModel::populate(
   dictionaries = active;
   allDicts = &available;
 
-  reset();
+  beginResetModel();
+  endResetModel();
 }
 
 void DictListModel::populate(
   std::vector< sptr< Dictionary::Class > > const & active )
 {
   dictionaries = active;
-  reset();
+  beginResetModel();
+  endResetModel();
 }
 
 void DictListModel::setAsSource()
@@ -320,7 +328,7 @@ bool DictListModel::setData( QModelIndex const & index, const QVariant & value,
 
     g.dictionaries.push_back( Config::DictionaryRef( value.toString(), QString() ) );
 
-    Instances::Group i( g, *allDicts );
+    Instances::Group i( g, *allDicts, Config::Group() );
 
     if ( i.dictionaries.size() == 1 )
     {
@@ -356,7 +364,8 @@ void DictListModel::removeSelectedRows( QItemSelectionModel * source )
     dictionaries.erase( dictionaries.begin() + rows.at( i ).row() );
   }
 
-  reset();
+  beginResetModel();
+  endResetModel();
   emit contentChanged();
 }
 
@@ -403,26 +412,20 @@ void DictListModel::addSelectedUniqueFromModel( QItemSelectionModel * source )
   if ( list.empty() )
     return;
 
-  for ( unsigned i = 0; i < allDicts->size(); i++ )
+  for ( int j = 0; j < list.size(); j++ )
   {
-    for ( int j = 0; j < list.size(); j++ )
+    for ( unsigned i = 0; i < allDicts->size(); i++ )
     {
       if ( allDicts->at( i )->getId() == list.at( j ) )
       {
         dictionaries.push_back( allDicts->at( i ) );
-        list.remove( j );
-        if ( list.isEmpty() )
-        {
-          reset();
-          emit contentChanged();
-          return;
-        }
         break;
       }
     }
   }
 
-  reset();
+  beginResetModel();
+  endResetModel();
   emit contentChanged();
 }
 
@@ -447,7 +450,8 @@ void DictListModel::filterDuplicates()
 
   if ( doReset )
   {
-    reset();
+    beginResetModel();
+    endResetModel();
     emit contentChanged();
   }
 }

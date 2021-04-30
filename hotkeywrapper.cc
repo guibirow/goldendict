@@ -6,31 +6,48 @@
 #include "hotkeywrapper.hh"
 #include "gddebug.hh"
 
-#ifdef Q_WS_X11
-#include <X11/Xlibint.h>
-#endif
+#include <QWidget>
+#include <QMainWindow>
 
-#ifdef Q_OS_WIN32
+#ifdef Q_OS_WIN
 #include "mainwindow.hh"
 #endif
 
 //////////////////////////////////////////////////////////////////////////
 
 QHotkeyApplication::QHotkeyApplication( int & argc, char ** argv ):
-  QtSingleApplication( argc, argv )
+  QIntermediateApplication( argc, argv )
 #ifdef Q_OS_WIN32
 ,  mainWindow( 0 )
 #endif
 {
+  connect( this, SIGNAL( commitDataRequest( QSessionManager& ) ),
+           this, SLOT( hotkeyAppCommitData( QSessionManager& ) ), Qt::DirectConnection );
+
+  connect( this, SIGNAL( saveStateRequest( QSessionManager& ) ),
+           this, SLOT( hotkeyAppSaveState( QSessionManager& ) ), Qt::DirectConnection );
+
+#if defined( Q_OS_WIN ) && IS_QT_5
+  installNativeEventFilter( this );
+#endif
 }
 
 QHotkeyApplication::QHotkeyApplication( QString const & id,
                                         int & argc, char ** argv ):
-  QtSingleApplication( id, argc, argv )
+  QIntermediateApplication( id, argc, argv )
 #ifdef Q_OS_WIN32
 ,  mainWindow( 0 )
 #endif
 {
+  connect( this, SIGNAL( commitDataRequest( QSessionManager& ) ),
+           this, SLOT( hotkeyAppCommitData( QSessionManager& ) ), Qt::DirectConnection );
+
+  connect( this, SIGNAL( saveStateRequest( QSessionManager& ) ),
+           this, SLOT( hotkeyAppSaveState( QSessionManager& ) ), Qt::DirectConnection );
+
+#if defined( Q_OS_WIN ) && IS_QT_5
+  installNativeEventFilter( this );
+#endif
 }
 
 void QHotkeyApplication::addDataCommiter( DataCommitter & d )
@@ -43,10 +60,15 @@ void QHotkeyApplication::removeDataCommiter( DataCommitter & d )
   dataCommitters.removeAll( &d );
 }
 
-void QHotkeyApplication::commitData( QSessionManager & s )
+void QHotkeyApplication::hotkeyAppCommitData( QSessionManager & mgr )
 {
   for( int x = 0; x < dataCommitters.size(); ++x )
-    dataCommitters[ x ]->commitData( s );
+    dataCommitters[ x ]->commitData( mgr );
+}
+
+void QHotkeyApplication::hotkeyAppSaveState(QSessionManager & mgr )
+{
+  mgr.setRestartHint( QSessionManager::RestartNever );
 }
 
 void QHotkeyApplication::registerWrapper(HotkeyWrapper *wrapper)
@@ -85,6 +107,27 @@ HotkeyWrapper::HotkeyWrapper(QObject *parent) : QThread( parent ),
 {
 #ifdef Q_OS_WIN
   hwnd=(HWND)((static_cast<QMainWindow*>(parent))->winId());
+
+  dllHandler.hDLLHandle = LoadLibraryA( "GdHotkeys.dll" );
+  if( dllHandler.hDLLHandle )
+  {
+    dllHandler.setHook = ( setHookProc )GetProcAddress( dllHandler.hDLLHandle, "setHook" );
+    dllHandler.removeHook = ( removeHookProc )GetProcAddress( dllHandler.hDLLHandle, "removeHook" );
+    dllHandler.setHotkeys = ( setHotkeysProc )GetProcAddress( dllHandler.hDLLHandle, "setHotkeys" );
+    dllHandler.clearHotkeys = ( clearHotkeysProc )GetProcAddress( dllHandler.hDLLHandle, "clearHotkeys" );
+
+    if( !dllHandler.setHook || !dllHandler.removeHook || !dllHandler.setHotkeys || !dllHandler.clearHotkeys )
+    {
+      FreeLibrary( dllHandler.hDLLHandle );
+      dllHandler.hDLLHandle = 0;
+    }
+  }
+
+  if( dllHandler.hDLLHandle )
+    gdWarning( "Handle global hotkeys via GdHotkeys.dll" );
+  else
+    gdWarning( "Handle global hotkeys via RegisterHotkey()" );
+
 #else
   init();
 #endif
@@ -94,13 +137,17 @@ HotkeyWrapper::HotkeyWrapper(QObject *parent) : QThread( parent ),
 HotkeyWrapper::~HotkeyWrapper()
 {
   unregister();
+#ifdef Q_OS_WIN32
+  if( dllHandler.hDLLHandle )
+    FreeLibrary( dllHandler.hDLLHandle );
+#endif
 }
 
 void HotkeyWrapper::waitKey2()
 {
   state2 = false;
 
-#ifdef Q_WS_X11
+#ifdef HAVE_X11
 
   if ( keyToUngrab != grabbedKeys.end() )
   {
@@ -131,7 +178,7 @@ bool HotkeyWrapper::checkState(quint32 vk, quint32 mod)
 
     if (hs.key == vk && hs.modifier == mod) {
 
-      #ifdef Q_WS_WIN32
+      #ifdef Q_OS_WIN32
 
       if( hs.key2 != 0 || ( mod == MOD_CONTROL && ( vk == VK_INSERT || vk == 'c' || vk == 'C' ) ) )
       {
@@ -227,7 +274,7 @@ bool HotkeyWrapper::checkState(quint32 vk, quint32 mod)
       state2waiter = hs;
       QTimer::singleShot(500, this, SLOT(waitKey2()));
 
-      #ifdef Q_WS_X11
+      #ifdef HAVE_X11
 
       // Grab the second key, unless it's grabbed already
       // Note that we only grab the clipboard key only if
@@ -250,7 +297,7 @@ bool HotkeyWrapper::checkState(quint32 vk, quint32 mod)
 
 //////////////////////////////////////////////////////////////////////////
 
-#ifdef Q_WS_WIN
+#ifdef Q_OS_WIN
 
 void HotkeyWrapper::init()
 {
@@ -283,6 +330,14 @@ bool HotkeyWrapper::setGlobalKey( int key, int key2,
 
   hotkeys.append( HotkeyStruct( vk, vk2, mod, handle, id ) );
 
+  if( dllHandler.hDLLHandle )
+  {
+    dllHandler.removeHook();
+    dllHandler.setHotkeys( vk, vk2, mod, hotkeys.size() - 1 );
+    dllHandler.setHook( hwnd );
+    return true;
+  }
+
   if (!RegisterHotKey(hwnd, id++, mod, vk))
     return false;
 
@@ -298,13 +353,21 @@ bool HotkeyWrapper::winEvent ( MSG * message, long * result )
   if (message->message == WM_HOTKEY)
     return checkState( (message->lParam >> 16), (message->lParam & 0xffff) );
 
+  if( message->message == GD_HOTKEY_MESSAGE )
+  {
+    int n = (int)message->wParam;
+    if( n < hotkeys.size() && n >= 0 )
+      emit hotkeyActivated( hotkeys.at( n ).handle );
+    return true;
+  }
+
   return false;
 }
 
 quint32 HotkeyWrapper::nativeKey(int key)
 {
   if (key >= Qt::Key_0 && key <= Qt::Key_9)
-    return key;
+    return VK_NUMPAD0 + ( key - Qt::Key_0 );
 
   if (key >= Qt::Key_A && key <= Qt::Key_Z)
     return key;
@@ -359,6 +422,33 @@ quint32 HotkeyWrapper::nativeKey(int key)
     case Qt::Key_F22:       return VK_F22;
     case Qt::Key_F23:       return VK_F23;
     case Qt::Key_F24:       return VK_F24;
+    case Qt::Key_Colon:
+    case Qt::Key_Semicolon:    return VK_OEM_1;
+    case Qt::Key_Question:     return VK_OEM_2;
+    case Qt::Key_AsciiTilde:
+    case Qt::Key_QuoteLeft:    return VK_OEM_3;
+    case Qt::Key_BraceLeft:
+    case Qt::Key_BracketLeft:  return VK_OEM_4;
+    case Qt::Key_Bar:
+    case Qt::Key_Backslash:    return VK_OEM_5;
+    case Qt::Key_BraceRight:
+    case Qt::Key_BracketRight: return VK_OEM_6;
+    case Qt::Key_QuoteDbl:
+    case Qt::Key_Apostrophe:   return VK_OEM_7;
+    case Qt::Key_Less:         return VK_OEM_COMMA;
+    case Qt::Key_Greater:      return VK_OEM_PERIOD;
+    case Qt::Key_Equal:        return VK_OEM_PLUS;
+    case Qt::Key_ParenRight:   return 0x30;
+    case Qt::Key_Exclam:       return 0x31;
+    case Qt::Key_At:           return 0x32;
+    case Qt::Key_NumberSign:   return 0x33;
+    case Qt::Key_Dollar:       return 0x34;
+    case Qt::Key_Percent:      return 0x35;
+    case Qt::Key_AsciiCircum:  return 0x36;
+    case Qt::Key_Ampersand:    return 0x37;
+    case Qt::Key_copyright:    return 0x38;
+    case Qt::Key_ParenLeft:    return 0x39;
+    case Qt::Key_Underscore:   return VK_OEM_MINUS;
     default:;
   }
 
@@ -367,24 +457,57 @@ quint32 HotkeyWrapper::nativeKey(int key)
 
 void HotkeyWrapper::unregister()
 {
-  for (int i = 0; i < hotkeys.count(); i++)
+  if( dllHandler.hDLLHandle )
   {
-    HotkeyStruct const & hk = hotkeys.at( i );
+    dllHandler.removeHook();
+    dllHandler.clearHotkeys();
+  }
+  else
+  {
+    for (int i = 0; i < hotkeys.count(); i++)
+    {
+      HotkeyStruct const & hk = hotkeys.at( i );
 
-    UnregisterHotKey( hwnd, hk.id );
+      UnregisterHotKey( hwnd, hk.id );
 
-    if ( hk.key2 && hk.key2 != hk.key )
-      UnregisterHotKey( hwnd, hk.id+1 );
+      if ( hk.key2 && hk.key2 != hk.key )
+        UnregisterHotKey( hwnd, hk.id+1 );
+    }
   }
 
   (static_cast<QHotkeyApplication*>(qApp))->unregisterWrapper(this);
 }
 
 
+#if IS_QT_5
+
+bool QHotkeyApplication::nativeEventFilter( const QByteArray & /*eventType*/, void * message, long * result )
+{
+  MSG * msg = reinterpret_cast< MSG * >( message );
+
+  if ( msg->message == WM_HOTKEY || msg->message == GD_HOTKEY_MESSAGE )
+  {
+    for (int i = 0; i < hotkeyWrappers.size(); i++)
+    {
+      if ( hotkeyWrappers.at(i)->winEvent( msg, result ) )
+        return true;
+    }
+  }
+
+  if( mainWindow )
+  {
+    if( ( static_cast< MainWindow * >( mainWindow ) )->handleGDMessage( msg, result ) )
+      return true;
+  }
+
+  return false;
+}
+
+#else // IS_QT_5
 
 bool QHotkeyApplication::winEventFilter ( MSG * message, long * result )
 {
-  if (message->message == WM_HOTKEY)
+  if (message->message == WM_HOTKEY || message->message == GD_HOTKEY_MESSAGE)
   {
     for (int i = 0; i < hotkeyWrappers.size(); i++)
     {
@@ -401,6 +524,8 @@ bool QHotkeyApplication::winEventFilter ( MSG * message, long * result )
 
   return QApplication::winEventFilter( message, result );
 }
+
+#endif
 
 //////////////////////////////////////////////////////////////////////////
 
@@ -658,7 +783,7 @@ HotkeyWrapper::GrabbedKeys::iterator HotkeyWrapper::grabKey( quint32 keyCode,
 
     if ( errorHandler.isError() )
     {
-      qDebug() << "Warning: Possible hotkeys conflict. Check your hotkeys options.";
+      gdWarning( "Possible hotkeys conflict. Check your hotkeys options." );
       ungrabKey( result.first );
     }
   }
@@ -675,7 +800,7 @@ void HotkeyWrapper::ungrabKey( GrabbedKeys::iterator i )
 
   if ( errorHandler.isError() )
   {
-    qDebug() << "Warning: Cannot ungrab the hotkey";
+    gdWarning( "Cannot ungrab the hotkey" );
   }
 }
 

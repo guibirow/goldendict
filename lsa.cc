@@ -20,11 +20,12 @@
 
 #define OV_EXCLUDE_STATIC_CALLBACKS
 #include <vorbis/vorbisfile.h>
-
-#include <QUrl>
 #include <QDir>
+#include <QUrl>
 #include <QDebug>
 #include <QFile>
+
+#include "qt4x5.hh"
 
 namespace Lsa {
 
@@ -176,11 +177,12 @@ public:
 
   virtual sptr< Dictionary::DataRequest > getArticle( wstring const &,
                                                       vector< wstring > const & alts,
-                                                      wstring const & )
-    throw( std::exception );
+                                                      wstring const &,
+                                                      bool ignoreDiacritics )
+    THROW_SPEC( std::exception );
 
   virtual sptr< Dictionary::DataRequest > getResource( string const & name )
-    throw( std::exception );
+    THROW_SPEC( std::exception );
 
 protected:
 
@@ -213,16 +215,17 @@ LsaDictionary::LsaDictionary( string const & id,
 
 sptr< Dictionary::DataRequest > LsaDictionary::getArticle( wstring const & word,
                                                            vector< wstring > const & alts,
-                                                           wstring const & )
-  throw( std::exception )
+                                                           wstring const &,
+                                                           bool ignoreDiacritics )
+  THROW_SPEC( std::exception )
 {
-  vector< WordArticleLink > chain = findArticles( word );
+  vector< WordArticleLink > chain = findArticles( word, ignoreDiacritics );
 
   for( unsigned x = 0; x < alts.size(); ++x )
   {
     /// Make an additional query for each alt
 
-    vector< WordArticleLink > altChain = findArticles( alts[ x ] );
+    vector< WordArticleLink > altChain = findArticles( alts[ x ], ignoreDiacritics );
 
     chain.insert( chain.end(), altChain.begin(), altChain.end() );
   }
@@ -234,6 +237,8 @@ sptr< Dictionary::DataRequest > LsaDictionary::getArticle( wstring const & word,
                                     // by only allowing them to appear once.
 
   wstring wordCaseFolded = Folding::applySimpleCaseOnly( word );
+  if( ignoreDiacritics )
+    wordCaseFolded = Folding::applyDiacriticsOnly( wordCaseFolded );
 
   for( unsigned x = 0; x < chain.size(); ++x )
   {
@@ -247,6 +252,8 @@ sptr< Dictionary::DataRequest > LsaDictionary::getArticle( wstring const & word,
 
     wstring headwordStripped =
       Folding::applySimpleCaseOnly( Utf8::decode( chain[ x ].word ) );
+    if( ignoreDiacritics )
+      headwordStripped = Folding::applyDiacriticsOnly( headwordStripped );
 
     multimap< wstring, string > & mapToUse =
       ( wordCaseFolded == headwordStripped ) ?
@@ -273,7 +280,7 @@ sptr< Dictionary::DataRequest > LsaDictionary::getArticle( wstring const & word,
     QUrl url;
     url.setScheme( "gdau" );
     url.setHost( QString::fromUtf8( getId().c_str() ) );
-    url.setPath( QString::fromUtf8( i->second.c_str() ) );
+    url.setPath( Qt4x5::Url::ensureLeadingSlash( QString::fromUtf8( i->second.c_str() ) ) );
 
     string ref = string( "\"" ) + url.toEncoded().data() + "\"";
 
@@ -291,7 +298,7 @@ sptr< Dictionary::DataRequest > LsaDictionary::getArticle( wstring const & word,
     QUrl url;
     url.setScheme( "gdau" );
     url.setHost( QString::fromUtf8( getId().c_str() ) );
-    url.setPath( QString::fromUtf8( i->second.c_str() ) );
+    url.setPath( Qt4x5::Url::ensureLeadingSlash( QString::fromUtf8( i->second.c_str() ) ) );
 
     string ref = string( "\"" ) + url.toEncoded().data() + "\"";
 
@@ -392,7 +399,7 @@ __attribute__((packed))
 ;
 
 sptr< Dictionary::DataRequest > LsaDictionary::getResource( string const & name )
-  throw( std::exception )
+  THROW_SPEC( std::exception )
 {
   // See if the name ends in .wav. Remove that extension then
 
@@ -470,7 +477,7 @@ sptr< Dictionary::DataRequest > LsaDictionary::getResource( string const & name 
 
     if ( result <= 0 )
     {
-      qWarning( "Warning: failed to read Vorbis data (code = %ld)\n", result );
+      gdWarning( "Failed to read Vorbis data (code = %ld)\n", result );
       memset( ptr, 0, left );
       break;
     }
@@ -517,7 +524,7 @@ vector< sptr< Dictionary::Class > > makeDictionaries(
                                       vector< string > const & fileNames,
                                       string const & indicesDir,
                                       Dictionary::Initializing & initializing )
-  throw( std::exception )
+  THROW_SPEC( std::exception )
 {
   vector< sptr< Dictionary::Class > > dictionaries;
 

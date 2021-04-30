@@ -404,7 +404,7 @@ static enum  DZ_ERRORS dict_read_header( const char *filename,
 
       *pt = '\0';
       header->comment = NULL;//str_find( buffer );
-      header->headerLength += strlen( header->comment ) + 1;
+      header->headerLength += strlen( buffer ) + 1;
    } else {
       header->comment = NULL;
    }
@@ -629,7 +629,8 @@ char *dict_data_read_ (
    case DICT_TEXT:
    {
 #ifdef __WIN32
-     DWORD pos = SetFilePointer( h->fd, start, 0, FILE_BEGIN );
+     long hiPtr = 0;
+     DWORD pos = SetFilePointer( h->fd, start, &hiPtr, FILE_BEGIN );
      DWORD readed = 0;
      if( pos != INVALID_SET_FILE_POINTER || GetLastError() != NO_ERROR )
        ReadFile( h->fd, buffer, size, &readed, 0 );
